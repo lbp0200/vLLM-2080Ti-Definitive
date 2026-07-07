@@ -160,8 +160,8 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
     )
 
 
-def test_independent_dflash_pools_keep_lookup_disabled_until_reconciled():
-    """DFlash independent pools must not expose an unsafe partial hit."""
+def test_independent_dflash_pools_reuse_target_without_draft_lookup():
+    """DFlash target KV can be reused while draft context is rebuilt."""
     block_size = 8
     config = KVCacheConfig(
         num_blocks=100,
@@ -205,9 +205,15 @@ def test_independent_dflash_pools_keep_lookup_disabled_until_reconciled():
     assert manager.allocate_slots(first, len(prompt), 0, computed) is not None
     manager.free(first)
 
+    draft_pool = manager.coordinator.block_pools[1]
+    for block_hash in first.block_hashes:
+        draft_pool.cached_block_hash_to_block._cache.pop(
+            make_block_hash_with_group_id(block_hash, 1), None
+        )
+
     second = make_request("second", prompt + [999], block_size, sha256)
     _, hit_tokens, _ = manager.get_computed_blocks(second)
-    assert hit_tokens == 0
+    assert hit_tokens > 0
 
 
 HISPARSE_BLOCK_SIZE = 16

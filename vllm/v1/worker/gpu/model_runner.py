@@ -738,6 +738,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.input_buffers,
                 self.attn_groups,
             )
+            if hasattr(self.speculator, "set_num_cached_tokens"):
+                # DFlash/DSpark mask cache-restored tokens out of the draft's
+                # context (their draft context KV was never computed).
+                self.speculator.set_num_cached_tokens(
+                    self.req_states.num_cached_tokens.gpu
+                )
         if self.speculator is not None:
             # After set_attn, so the speculator can size its cudagraph mode
             # to its own attention support.
