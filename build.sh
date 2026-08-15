@@ -20,6 +20,26 @@ fail() {
   exit 1
 }
 
+if [[ -z "${CUDA_HOME:-}" ]]; then
+  for candidate in /usr/local/cuda-13.0 /usr/local/cuda-13; do
+    if [[ -x "$candidate/bin/nvcc" ]]; then
+      CUDA_HOME="$candidate"
+      export CUDA_HOME
+      break
+    fi
+  done
+fi
+if [[ -n "${CUDA_HOME:-}" && -d "$CUDA_HOME/bin" ]]; then
+  case ":$PATH:" in
+    *:"$CUDA_HOME/bin":*) ;;
+    *) PATH="$CUDA_HOME/bin:$PATH"; export PATH ;;
+  esac
+fi
+if ! command -v uv >/dev/null 2>&1 && [[ -x "${HOME:-}/.local/bin/uv" ]]; then
+  PATH="${HOME}/.local/bin:$PATH"
+  export PATH
+fi
+
 is_positive_integer() {
   [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]
 }
