@@ -2,6 +2,9 @@ nav:
   - Home: README.md
   - User Guide:
     - usage/README.md
+    - 2080 Ti SM75:
+      - 0.2.1-pre Migration Validation: 2080ti-0.2.1-pre-validation.md
+      - Gemma4 SM75 Support Notes: gemma4-sm75-support.md
     - Getting Started:
       - getting_started/quickstart.md
       - getting_started/installation

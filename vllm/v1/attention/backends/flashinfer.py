@@ -508,12 +508,12 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        # FlashInfer supports SM75+, but is currently broken on SM75 (Turing):
-        # https://github.com/flashinfer-ai/flashinfer/issues/3620 (fix:
-        # https://github.com/flashinfer-ai/flashinfer/pull/3621). Temporarily
-        # raise the floor to SM80 so it is not auto-selected on SM75 until
-        # that fix lands; revert to DeviceCapability(7, 5) once it does.
-        return capability >= DeviceCapability(8, 0) and capability <= DeviceCapability(
+        # Upstream temporarily raises this floor because of
+        # https://github.com/flashinfer-ai/flashinfer/issues/3620.  This fork
+        # retains SM75 for its validated Turing route: the current build is
+        # covered by the real Qwen3.8 FP8 smoke and benchmark, while
+        # unsupported kernels still fail their individual combination checks.
+        return capability >= DeviceCapability(7, 5) and capability <= DeviceCapability(
             12, 1
         )
 

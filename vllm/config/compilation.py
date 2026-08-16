@@ -1398,6 +1398,28 @@ class CompilationConfig:
             self.cudagraph_mode = CUDAGraphMode.NONE
             return CUDAGraphMode.NONE
 
+        # The SM75 TQK8V4 route uses a full decode graph for MTP.  Upstream's
+        # generic attention capability check cannot prove this hybrid
+        # Mamba/GDN path safe and would otherwise downgrade it to PIECEWISE.
+        # Keep the fast path an explicit opt-in, matching the 0.1.14 route.
+        allow_mamba_spec_full_cudagraph = (
+            uniform_decode_query_len > 1
+            and kv_cache_config is not None
+            and kv_cache_config.has_mamba_layers
+            and envs.VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH
+        )
+        if (
+            allow_mamba_spec_full_cudagraph
+            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and min_cg_support.value < AttentionCGSupport.UNIFORM_BATCH.value
+        ):
+            logger.warning(
+                "Allowing spec-decode full CUDA graph replay for Mamba/GDN "
+                "KV cache layers because "
+                "VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=1. This is a fast "
+                "mode opt-in and may reduce output stability."
+            )
+
         # Check cudagraph for mixed batch is supported
         if (
             cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL
@@ -1458,6 +1480,7 @@ class CompilationConfig:
             cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
             and uniform_decode_query_len > 1
             and min_cg_support.value < AttentionCGSupport.UNIFORM_BATCH.value
+            and not allow_mamba_spec_full_cudagraph
         ):
             msg = (
                 f"CUDAGraphMode.{cudagraph_mode.name} is not supported"

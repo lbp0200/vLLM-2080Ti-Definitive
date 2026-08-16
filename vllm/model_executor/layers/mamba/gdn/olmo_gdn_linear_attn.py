@@ -41,6 +41,7 @@ from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
 @PluggableLayer.register("olmo_hybrid_gated_delta_net_attention")
@@ -365,6 +366,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=spec_query_start_loc,
                 max_query_len=spec_state_indices_tensor.size(-1),
+                null_block_id=PAD_SLOT_ID,
                 validate_data=False,
             )
 
@@ -380,6 +382,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
                 has_initial_state=has_initial_state,
                 cache_indices=non_spec_state_indices_tensor,
                 query_start_loc=non_spec_query_start_loc,
+                null_block_id=PAD_SLOT_ID,
                 metadata=attn_metadata,
             ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
@@ -393,6 +396,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
                 conv_state_indices=non_spec_state_indices_tensor[
                     : attn_metadata.num_decodes
                 ],
+                null_block_id=PAD_SLOT_ID,
                 validate_data=True,
             )
         else:
@@ -442,6 +446,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
                 ssm_state_indices=spec_state_indices_tensor,
                 num_accepted_tokens=num_accepted_tokens,
                 use_qk_l2norm_in_kernel=True,
+                null_block_id=PAD_SLOT_ID,
             )
         else:
             core_attn_out_spec, last_recurrent_state = None, None
@@ -486,6 +491,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ],
                     ssm_state_indices=non_spec_state_indices_tensor,
                     use_qk_l2norm_in_kernel=True,
+                    null_block_id=PAD_SLOT_ID,
                 )
             )
         else:

@@ -11,6 +11,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from .op import exp, log
 
@@ -50,6 +51,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     stride_final_state_token: tl.constexpr,
     stride_indices_seq: tl.constexpr,
     stride_indices_tok: tl.constexpr,
+    null_block_id: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
     IS_BETA_HEADWISE: tl.constexpr,  # whether beta is headwise vector or scalar,
@@ -110,8 +112,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
                 tl.int64
             )
-            # Skip if state index is invalid (NULL_BLOCK_ID=0)
-            if state_idx <= 0:
+            if state_idx < 0 or state_idx == null_block_id:
                 return
             p_h0 = h0 + state_idx * stride_init_state_token
         else:
@@ -154,8 +155,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             final_state_idx = tl.load(
                 ssm_state_indices + i_n * stride_indices_seq + i_t
             ).to(tl.int64)
-            # Only store if state index is valid (not NULL_BLOCK_ID=0)
-            if final_state_idx > 0:
+            if final_state_idx >= 0 and final_state_idx != null_block_id:
                 p_ht = ht + final_state_idx * stride_final_state_token
                 p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
                 tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
@@ -188,6 +188,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
+    null_block_id: int = NULL_BLOCK_ID,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -241,6 +242,7 @@ def fused_recurrent_gated_delta_rule_fwd(
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,
         stride_indices_tok=stride_indices_tok,
+        null_block_id=null_block_id,
         IS_BETA_HEADWISE=beta.ndim == v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
@@ -270,6 +272,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     stride_init_state_token: tl.constexpr,
     stride_final_state_token: tl.constexpr,
     stride_indices_seq: tl.constexpr,
+    null_block_id: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
@@ -296,8 +299,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(tl.int64)
     p_o = o + (i_n * HV + i_hv) * V + o_v
 
-    # Skip if state index is invalid (NULL_BLOCK_ID=0)
-    if state_idx <= 0:
+    if state_idx < 0 or state_idx == null_block_id:
         zero = tl.zeros([BV], dtype=tl.float32).to(p_o.dtype.element_ty)
         tl.store(p_o, zero, mask=mask_v)
         return
@@ -351,6 +353,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     out: torch.Tensor,
     ssm_state_indices: torch.Tensor,
     use_qk_l2norm_in_kernel: bool = False,
+    null_block_id: int = NULL_BLOCK_ID,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if mixed_qkv.ndim != 2:
         raise ValueError(
@@ -470,6 +473,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         stride_init_state_token=stride_init_state_token,
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,
+        null_block_id=null_block_id,
         H=H,
         HV=HV,
         K=K,
@@ -501,6 +505,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         ssm_state_indices: torch.Tensor | None = None,
         num_accepted_tokens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
+        null_block_id: int = NULL_BLOCK_ID,
     ):
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
             q=q.contiguous(),
@@ -515,6 +520,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             ssm_state_indices=ssm_state_indices,
             num_accepted_tokens=num_accepted_tokens,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            null_block_id=null_block_id,
         )
 
         return o, final_state
@@ -533,6 +539,7 @@ def fused_recurrent_gated_delta_rule(
     ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
+    null_block_id: int = NULL_BLOCK_ID,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -622,5 +629,6 @@ def fused_recurrent_gated_delta_rule(
         ssm_state_indices,
         num_accepted_tokens,
         use_qk_l2norm_in_kernel,
+        null_block_id,
     )
     return o, final_state

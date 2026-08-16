@@ -16,7 +16,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import (
-    NULL_BLOCK_ID,
+    PAD_SLOT_ID,
     compute_causal_conv1d_metadata,
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
@@ -99,7 +99,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             _resolve_gdn_prefill_backend,
         )
 
-        self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"]
+        self.gdn_prefill_backend: Literal[
+            "triton", "flashinfer", "flashqla_legacy", "cutedsl"
+        ]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
 
         if self.speculative_config:
@@ -438,7 +440,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 spec_state_indices_tensor, non_blocking=True
             )
             spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
-            spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)
+            # GDN state slot 0 is valid, so graph padding must use -1.
+            spec_state_indices_tensor[num_spec_decodes:].fill_(PAD_SLOT_ID)
 
             self.spec_sequence_masks[:num_spec_decodes].copy_(
                 spec_sequence_masks[:num_spec_decodes], non_blocking=True
@@ -484,7 +487,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
                 :batch_size
             ]
-            non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
+            # GDN state slot 0 is valid, so graph padding must use -1.
+            non_spec_state_indices_tensor[num_decodes:].fill_(PAD_SLOT_ID)
 
             self.non_spec_query_start_loc[: num_decodes + 1].copy_(
                 non_spec_query_start_loc, non_blocking=True

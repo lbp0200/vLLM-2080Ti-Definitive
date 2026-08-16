@@ -9,6 +9,7 @@ from vllm.third_party.flash_linear_attention.ops import (
     fused_recurrent_gated_delta_rule,
     fused_recurrent_gated_delta_rule_packed_decode,
 )
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 DEVICE = current_platform.device_type
 

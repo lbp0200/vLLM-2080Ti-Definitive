@@ -19,18 +19,23 @@ Per-head per-position slot layout:
 import contextlib
 import functools
 import math
+import os
 from dataclasses import dataclass, replace
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any, ClassVar
 
 import torch
 import torch.nn.functional as F
+from packaging.version import Version
 
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.turboquant.centroids import (
     get_centroids,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import (
@@ -60,7 +65,7 @@ from vllm.v1.attention.ops.flydsl_turboquant_decode import (
 )
 from vllm.v1.attention.ops.triton_turboquant_decode import (
     _tq_full_dequant_kv,
-    _use_fp8_e4b15,
+    _fp8_format_code,
     triton_turboquant_decode_attention,
 )
 from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
@@ -76,12 +81,66 @@ _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 if _HAS_FLASH_ATTN:
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
+try:
+    from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
+except ImportError:
+    BatchPrefillWithRaggedKVCacheWrapper = None  # type: ignore[assignment]
+
+
+def _flashinfer_version() -> Version | None:
+    try:
+        return Version(version("flashinfer-python"))
+    except (PackageNotFoundError, ValueError):
+        return None
+
+
+_FLASHINFER_VERSION = _flashinfer_version()
+
 # Continuation prefill: for small continuation chunks (q_len ≤ threshold),
 # use the TQ decode kernel directly instead of full-dequant + flash_attn.
 # do_kv_cache_update already stored all tokens to TQ cache, so the decode
 # kernel can read them efficiently. This avoids O(cached_len) dequant work
 # per continuation, eliminating the O(N²/chunk_size) collapse at long context.
 _CONTINUATION_DECODE_THRESHOLD = 128
+_SPEC_CONTINUATION_DECODE_FASTPATH = (
+    os.getenv("VLLM_TURBOQUANT_SPEC_CONTINUATION_DECODE_FASTPATH", "0") == "1"
+)
+_TQ_CUDAGRAPH_SPEC_DECODE_SAFE = (
+    os.getenv("VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE", "0") == "1"
+)
+_TQ_CUDAGRAPH_SPEC_PREFIX_ROWS = (
+    os.getenv("VLLM_TURBOQUANT_CUDAGRAPH_SPEC_PREFIX_ROWS", "0") == "1"
+)
+
+
+def _normalize_turboquant_flashinfer_backend(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return "fa2"
+    return normalized or "fa2"
+
+
+_DEFAULT_TQ_FI_BACKEND = _normalize_turboquant_flashinfer_backend(
+    os.getenv("VLLM_TURBOQUANT_FLASHINFER_BACKEND", "fa2")
+)
+_DEFAULT_TQ_FI_PREFILL = os.getenv("VLLM_TURBOQUANT_USE_FLASHINFER_PREFILL", "1") == "1"
+_TQ_REQUIRE_FLASHINFER_PREFILL = (
+    os.getenv("VLLM_TURBOQUANT_REQUIRE_FLASHINFER_PREFILL", "0") == "1"
+)
+_DEFAULT_TQ_FI_PLAN_CACHE = (
+    os.getenv("VLLM_TURBOQUANT_FLASHINFER_PREFILL_PLAN_CACHE", "1") == "1"
+)
+_TQ_FI_PREFILL_CUDAGRAPH_SAFE = (
+    os.getenv("VLLM_TURBOQUANT_FLASHINFER_PREFILL_CUDAGRAPH_SAFE", "0") == "1"
+)
+_SM75_TQ_FI_PREFILL_MIN_QUERY_LEN = int(
+    os.getenv("VLLM_TURBOQUANT_SM75_FLASHINFER_PREFILL_MIN_QUERY_LEN", "1")
+)
+_SM75_TQ_FI_CONTINUATION_MIN_QUERY_LEN = int(
+    os.getenv("VLLM_TURBOQUANT_SM75_FLASHINFER_CONTINUATION_MIN_QUERY_LEN", "1")
+)
+_TQ_FI_PREFILL_WORKSPACES: dict[tuple[str, str], torch.Tensor] = {}
+_TQ_FI_PREFILL_WRAPPERS: dict[tuple[Any, ...], Any] = {}
 
 
 def _soa_imports():
@@ -118,6 +177,81 @@ def _build_hadamard_cached(d: int, device_str: str) -> torch.Tensor:
     while H.shape[0] < d:
         H = torch.cat([torch.cat([H, H], 1), torch.cat([H, -H], 1)], 0)
     return (H / math.sqrt(d)).to(torch.device(device_str))
+
+
+def _normalize_cuda_device(device: torch.device) -> torch.device:
+    device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        return torch.device("cuda", torch.cuda.current_device())
+    return device
+
+
+def _get_shared_flashinfer_prefill_workspace(
+    device: torch.device,
+    backend: str,
+) -> torch.Tensor:
+    device = _normalize_cuda_device(device)
+    key = (str(device), backend)
+    workspace = _TQ_FI_PREFILL_WORKSPACES.get(key)
+    if workspace is None:
+        workspace = torch.empty(
+            envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+            dtype=torch.uint8,
+            device=device,
+        )
+        _TQ_FI_PREFILL_WORKSPACES[key] = workspace
+    return workspace
+
+
+def _get_or_plan_tq_flashinfer_prefill_wrapper(
+    device: torch.device,
+    plan_key: tuple[Any, ...],
+    plan_kwargs: dict[str, Any],
+):
+    """Plan outside model forward so FlashInfer remains out of CUDA graphs."""
+    if BatchPrefillWithRaggedKVCacheWrapper is None:
+        return None
+    if not _DEFAULT_TQ_FI_PLAN_CACHE:
+        wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+            torch.empty(
+                envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                dtype=torch.uint8,
+                device=device,
+            ),
+            "NHD",
+            backend=_DEFAULT_TQ_FI_BACKEND,
+        )
+        wrapper.plan(**plan_kwargs)
+        return wrapper
+
+    norm_device = _normalize_cuda_device(device)
+    cache_key = (str(norm_device), _DEFAULT_TQ_FI_BACKEND, *plan_key)
+    wrapper = _TQ_FI_PREFILL_WRAPPERS.get(cache_key)
+    if wrapper is None:
+        workspace = _get_shared_flashinfer_prefill_workspace(
+            norm_device, _DEFAULT_TQ_FI_BACKEND
+        )
+        wrapper_kwargs: dict[str, Any] = {"backend": _DEFAULT_TQ_FI_BACKEND}
+        if _TQ_FI_PREFILL_CUDAGRAPH_SAFE:
+            qo_indptr = plan_kwargs.get("qo_indptr")
+            kv_indptr = plan_kwargs.get("kv_indptr")
+            if qo_indptr is None or kv_indptr is None:
+                raise RuntimeError("FlashInfer cudagraph-safe prefill requires indptr buffers")
+            wrapper_kwargs.update(
+                {
+                    "use_cuda_graph": True,
+                    "qo_indptr_buf": torch.empty_like(qo_indptr, device=norm_device),
+                    "kv_indptr_buf": torch.empty_like(kv_indptr, device=norm_device),
+                }
+            )
+        wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+            workspace,
+            "NHD",
+            **wrapper_kwargs,
+        )
+        wrapper.plan(**plan_kwargs)
+        _TQ_FI_PREFILL_WRAPPERS[cache_key] = wrapper
+    return wrapper
 
 
 class TurboQuantAttentionBackend(AttentionBackend):
@@ -207,10 +341,18 @@ class TurboQuantMetadata(AttentionMetadata):
     is_prefill: bool = False
     num_decodes: int = 0  # number of decode requests (first in batch)
     num_decode_tokens: int = 0  # tokens from decode requests
+    # CUDA graph capture uses this graph-safe multi-token continuation path
+    # when the scheduler classifies speculative MTP tokens as decode work.
+    force_spec_decode: bool = False
     # CPU-resident copies used by the prefill path for per-request iteration
     # without per-step D2H syncs.
     query_start_loc_cpu: torch.Tensor | None = None
     seq_lens_cpu: torch.Tensor | None = None
+    # FlashInfer wrappers are planned by the metadata builder. Keeping plan()
+    # out of AttentionImpl.forward avoids leaking a Python/JIT operation into
+    # the compiled model or its CUDA graph capture.
+    flashinfer_first_chunk_wrapper: Any | None = None
+    flashinfer_continuation_wrappers: dict[int, Any] | None = None
 
 
 class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
@@ -221,8 +363,137 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
+        self._init_reorder_batch_threshold(
+            1, supports_spec_as_decode=_TQ_CUDAGRAPH_SPEC_DECODE_SAFE
+        )
+        self._device = torch.device(device)
+        self._flashinfer_prefill_enabled = (
+            _DEFAULT_TQ_FI_PREFILL
+            and BatchPrefillWithRaggedKVCacheWrapper is not None
+            and current_platform.is_cuda()
+        )
+        if _TQ_REQUIRE_FLASHINFER_PREFILL and not self._flashinfer_prefill_enabled:
+            raise RuntimeError(
+                "TurboQuant fast route requires the FlashInfer prefill backend; "
+                "install a supported FlashInfer build or disable the fast route."
+            )
+        model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
+        self._flashinfer_num_qo_heads = model_config.get_num_attention_heads(
+            parallel_config
+        )
+        self._flashinfer_num_kv_heads = kv_cache_spec.num_kv_heads
+        self._flashinfer_head_dim = kv_cache_spec.head_size
+        self._flashinfer_dtype = model_config.dtype
+        self._flashinfer_scale = self._flashinfer_head_dim**-0.5
         self._reserve_workspace()
+
+    def _plan_flashinfer_prefill_wrappers(
+        self,
+        cam: CommonAttentionMetadata,
+        num_decodes: int,
+    ) -> tuple[Any | None, dict[int, Any] | None]:
+        """Prepare raw-K/V FlashInfer wrappers before model forward."""
+        if (
+            not self._flashinfer_prefill_enabled
+            or cam.max_query_len <= 0
+            or cam.query_start_loc_cpu is None
+            or cam.seq_lens_cpu_upper_bound is None
+        ):
+            return None, None
+
+        qsl = cam.query_start_loc_cpu
+        seq_lens = cam.seq_lens_cpu_upper_bound
+        q_lens = qsl[1:] - qsl[:-1]
+        num_reqs = q_lens.shape[0]
+        Hq = self._flashinfer_num_qo_heads
+        Hk = self._flashinfer_num_kv_heads
+        D = self._flashinfer_head_dim
+        dtype = self._flashinfer_dtype
+        window_left = -1
+
+        # A complete first chunk can use one batched ragged plan. The explicit
+        # CPU check prevents treating a continuation's raw K/V suffix as its
+        # entire context.
+        if num_decodes == 0 and torch.equal(q_lens, seq_lens[:num_reqs]):
+            plan_key = (
+                "batch_first_chunk",
+                Hq,
+                Hk,
+                D,
+                window_left,
+                str(dtype),
+                tuple(int(x) for x in qsl.tolist()),
+            )
+            wrapper = _get_or_plan_tq_flashinfer_prefill_wrapper(
+                self._device,
+                plan_key,
+                {
+                    "qo_indptr": qsl,
+                    "kv_indptr": qsl,
+                    "num_qo_heads": Hq,
+                    "num_kv_heads": Hk,
+                    "head_dim_qk": D,
+                    "causal": True,
+                    "window_left": window_left,
+                    "sm_scale": self._flashinfer_scale,
+                    "pos_encoding_mode": "NONE",
+                    "q_data_type": dtype,
+                    "kv_data_type": dtype,
+                    "seq_lens": q_lens,
+                    "seq_lens_q": q_lens,
+                    "max_token_per_sequence": cam.max_query_len,
+                    "max_sequence_kv": cam.max_seq_len,
+                },
+            )
+            return wrapper, None
+
+        # Continuation K/V is dequantized per request in forward, but its
+        # shapes are known to the scheduler. Plan each eligible request here.
+        wrappers: dict[int, Any] = {}
+        for request_idx in range(num_decodes, num_reqs):
+            q_len = int(q_lens[request_idx])
+            seq_len = int(seq_lens[request_idx])
+            if (
+                q_len <= _CONTINUATION_DECODE_THRESHOLD
+                or q_len < _SM75_TQ_FI_CONTINUATION_MIN_QUERY_LEN
+                or q_len >= seq_len
+            ):
+                continue
+            qo_indptr = torch.tensor([0, q_len], dtype=torch.int32, pin_memory=True)
+            kv_indptr = torch.tensor([0, seq_len], dtype=torch.int32, pin_memory=True)
+            plan_key = (
+                "continuation",
+                Hq,
+                Hk,
+                D,
+                window_left,
+                str(dtype),
+                q_len,
+                seq_len,
+            )
+            wrappers[request_idx] = _get_or_plan_tq_flashinfer_prefill_wrapper(
+                self._device,
+                plan_key,
+                {
+                    "qo_indptr": qo_indptr,
+                    "kv_indptr": kv_indptr,
+                    "num_qo_heads": Hq,
+                    "num_kv_heads": Hk,
+                    "head_dim_qk": D,
+                    "causal": True,
+                    "window_left": window_left,
+                    "sm_scale": self._flashinfer_scale,
+                    "pos_encoding_mode": "NONE",
+                    "q_data_type": dtype,
+                    "kv_data_type": dtype,
+                    "seq_lens": torch.tensor([seq_len], dtype=torch.int32),
+                    "seq_lens_q": torch.tensor([q_len], dtype=torch.int32),
+                    "max_token_per_sequence": q_len,
+                    "max_sequence_kv": seq_len,
+                },
+            )
+        return None, wrappers or None
 
     def _reserve_workspace(self) -> None:
         if not is_workspace_manager_initialized():
@@ -265,6 +536,20 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> TurboQuantMetadata:
         attn_metadata = self.build(0, common_attn_metadata)
+        if (
+            _TQ_CUDAGRAPH_SPEC_DECODE_SAFE
+            and 1 < attn_metadata.max_query_len <= _CONTINUATION_DECODE_THRESHOLD
+        ):
+            # Capture the MTP continuation through the raw-current-K/V path.
+            # Keep the shared warmup sequence length at one: GDN/Mamba reads
+            # the same CommonAttentionMetadata, and changing it to q_len
+            # makes its SM75 capture address speculative state that was not
+            # allocated for the dummy batch. TurboQuant clamps its local
+            # prefix length to zero below, so it does not need a synthetic
+            # q_len-sized prefix here.
+            attn_metadata.force_spec_decode = True
+            attn_metadata.seq_lens.fill_(1)
+            return attn_metadata
         # Set seq_lens to 1 so CUDA graph capture is fast
         # (real seq_lens are filled at replay time).
         attn_metadata.seq_lens.fill_(1)
@@ -281,6 +566,9 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             cam, decode_threshold=self.reorder_batch_threshold
         )
+        first_chunk_wrapper, continuation_wrappers = (
+            self._plan_flashinfer_prefill_wrappers(cam, num_decodes)
+        )
 
         return TurboQuantMetadata(
             seq_lens=cam.seq_lens,
@@ -295,6 +583,8 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             num_decode_tokens=num_decode_tokens,
             query_start_loc_cpu=cam.query_start_loc_cpu,
             seq_lens_cpu=cam.seq_lens_cpu_upper_bound,
+            flashinfer_first_chunk_wrapper=first_chunk_wrapper,
+            flashinfer_continuation_wrappers=continuation_wrappers,
         )
 
 
@@ -348,8 +638,32 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         self._val_data_bytes = math.ceil(head_size * cfg.effective_value_quant_bits / 8)
         self._n_centroids = cfg.n_centroids if not cfg.key_fp8 else 1
 
-        # Detect flash-attn version (FA2/3/4) for prefill paths.
-        self.fa_version = get_flash_attn_version(head_size=head_size)
+        self._fi_prefill_workspace: torch.Tensor | None = None
+        self._fi_prefill_backend = _DEFAULT_TQ_FI_BACKEND
+        self._use_flashinfer_prefill = (
+            _DEFAULT_TQ_FI_PREFILL
+            and BatchPrefillWithRaggedKVCacheWrapper is not None
+            and current_platform.is_cuda()
+        )
+        self._prefill_sliding_window = -1 if sliding_window is None else int(sliding_window)
+
+        # FlashInfer fa2 is available for the SM75 build. Prefer it for raw
+        # K/V prefill and continuation instead of routing those paths to SDPA.
+        self.fa_version = (
+            None
+            if self._use_flashinfer_prefill
+            else get_flash_attn_version(head_size=head_size)
+        )
+        if self._use_flashinfer_prefill:
+            capability = current_platform.get_device_capability()
+            cap_str = capability.as_version_str() if capability is not None else "unknown"
+            logger.info_once(
+                "TurboQuant prefill is using FlashInfer backend=%s on CUDA "
+                "capability %s (flashinfer=%s).",
+                self._fi_prefill_backend,
+                cap_str,
+                _FLASHINFER_VERSION or "unknown",
+            )
 
         # Fixed NUM_KV_SPLITS (grid dims must be constant for cudagraph,
         # and benchmarks show no regression vs dynamic in eager mode).
@@ -572,7 +886,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         num_decodes = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        if not attn_metadata.is_prefill:
+        if attn_metadata.force_spec_decode:
+            attn_out = self._spec_decode_attention(
+                q, kv_cache, attn_metadata, Pi, centroids, PiT
+            )
+        elif not attn_metadata.is_prefill:
             # Pure decode batch — fast path
             attn_out = self._decode_attention(
                 q, kv_cache, attn_metadata, Pi, centroids, PiT, layer
@@ -592,6 +910,14 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 PiT,
                 layer=layer,
             )
+        elif num_decode_tokens >= N or num_decodes >= attn_metadata.seq_lens.shape[0]:
+            # With spec-as-decode enabled, a uniform MTP continuation has no
+            # prefill tail even though its query length is greater than one.
+            # Each query needs an incrementing sequence length for causal
+            # attention, so it cannot use the regular decode path directly.
+            attn_out = self._spec_decode_attention(
+                q, kv_cache, attn_metadata, Pi, centroids, PiT
+            )
         else:
             # Mixed batch: decodes first (guaranteed by reorder_batch).
             attn_out = torch.empty(
@@ -609,9 +935,25 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 max_query_len=1,
                 max_seq_len=attn_metadata.max_seq_len,
                 is_prefill=False,
+                query_start_loc_cpu=(
+                    attn_metadata.query_start_loc_cpu[: num_decodes + 1]
+                    if attn_metadata.query_start_loc_cpu is not None
+                    else None
+                ),
+                seq_lens_cpu=(
+                    attn_metadata.seq_lens_cpu[:num_decodes]
+                    if attn_metadata.seq_lens_cpu is not None
+                    else None
+                ),
             )
             attn_out[:num_decode_tokens] = self._decode_attention(
-                q[:num_decode_tokens], kv_cache, decode_meta, Pi, centroids, PiT, layer
+                q[:num_decode_tokens],
+                kv_cache,
+                decode_meta,
+                Pi,
+                centroids,
+                PiT,
+                layer,
             )
 
             # --- Prefill portion (remaining requests) ---
@@ -648,6 +990,16 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 seq_lens_cpu=attn_metadata.seq_lens_cpu[num_decodes:]
                 if attn_metadata.seq_lens_cpu is not None
                 else None,
+                flashinfer_continuation_wrappers=(
+                    {
+                        request_idx - num_decodes: wrapper
+                        for request_idx, wrapper in (
+                            attn_metadata.flashinfer_continuation_wrappers or {}
+                        ).items()
+                        if request_idx >= num_decodes
+                    }
+                    or None
+                ),
             )
             k = key[:N].view(N, self.num_kv_heads, self.head_size)
             v = value[:N].view(N, self.num_kv_heads, self.head_size)
@@ -669,6 +1021,81 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             output[:N] = attn_out.to(output.dtype)
         else:
             output[:N] = attn_out.reshape(N, -1).to(output.dtype)
+        return output
+
+    def _spec_decode_attention(
+        self,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: TurboQuantMetadata,
+        Pi: torch.Tensor,
+        centroids: torch.Tensor,
+        PiT: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Run a multi-token speculative continuation as causal decodes.
+
+        This is the full CUDA-Graph route used by the SM75 fast profile. The
+        candidate K/V entries have already been written to the TurboQuant
+        cache, so one B=q_len compressed-cache launch preserves the historical
+        B=4 graph topology and its fused stage-2 reduction. The raw-K/V prefix
+        merge path is intentionally kept out of this route: on SM75 its
+        materialized B=4 page-table variant is not graph-safe and regresses the
+        validated ~100 tok/s path.
+        """
+        qsl_cpu = attn_metadata.query_start_loc_cpu
+        qsl = (
+            qsl_cpu.tolist()
+            if qsl_cpu is not None
+            else attn_metadata.query_start_loc.tolist()
+        )
+        num_reqs = attn_metadata.seq_lens.shape[0]
+        output = torch.empty_like(query)
+
+        max_seq = max(attn_metadata.max_seq_len, attn_metadata.max_query_len)
+        arange_cache: torch.Tensor | None = getattr(self, "_arange_cache", None)
+        if arange_cache is None or arange_cache.shape[0] <= max_seq:
+            arange_cache = torch.arange(
+                max_seq + 1,
+                device=query.device,
+                dtype=attn_metadata.seq_lens.dtype,
+            )
+            self._arange_cache = arange_cache
+
+        for request_idx in range(num_reqs):
+            q_start = qsl[request_idx]
+            q_end = qsl[request_idx + 1]
+            q_len = q_end - q_start
+            if q_len <= 0:
+                continue
+
+            rel_seq_lens = arange_cache[1 : q_len + 1]
+            seq_lens = (
+                attn_metadata.seq_lens[request_idx : request_idx + 1]
+                - q_len
+                + rel_seq_lens
+            ).contiguous()
+            block_table = (
+                attn_metadata.block_table[request_idx : request_idx + 1]
+                .expand(q_len, -1)
+                .contiguous()
+            )
+            output[q_start:q_end] = triton_turboquant_decode_attention(
+                query=query[q_start:q_end],
+                kv_cache=kv_cache,
+                block_table=block_table,
+                seq_lens=seq_lens,
+                Pi=Pi,
+                centroids=centroids,
+                scale=self.scale,
+                mse_bits=self.tq_config.key_mse_bits,
+                key_packed_size=self.tq_config.key_packed_size,
+                value_quant_bits=self.tq_config.effective_value_quant_bits,
+                key_fp8=self.tq_config.key_fp8,
+                norm_correction=self.tq_config.norm_correction,
+                PiT=PiT,
+                max_num_kv_splits=self.max_num_kv_splits,
+            ).to(query.dtype)
+
         return output
 
     # ------------------------------------------------------------------ #
@@ -733,6 +1160,21 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         layer: Any = None,
     ) -> torch.Tensor:
         N, Hq, D = query.shape
+
+        # The builder plans FlashInfer before the model forward. The compiled
+        # forward only launches the prepared kernel, preserving CUDA-graph
+        # capture for decode/spec-decode.
+        if attn_metadata.flashinfer_first_chunk_wrapper is not None:
+            return attn_metadata.flashinfer_first_chunk_wrapper.run(query, key, value)
+
+        if (
+            _TQ_REQUIRE_FLASHINFER_PREFILL
+            and attn_metadata.max_query_len == attn_metadata.max_seq_len
+        ):
+            raise RuntimeError(
+                "TurboQuant fast route could not plan FlashInfer prefill; "
+                "refusing FlashAttention/SDPA fallback."
+            )
 
         # Fast path: use flash_attn for first-chunk prefills (all K/V in batch).
         # max_query_len == max_seq_len means no request has prior cached KV.
@@ -868,26 +1310,60 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                             sliding_window=self.sliding_window,
                         )
                     else:
-                        out = triton_turboquant_decode_attention(
-                            query=q_seq,
-                            kv_cache=kv_cache,
-                            block_table=synth_bt,
-                            seq_lens=synth_seq_lens,
-                            Pi=Pi,
-                            centroids=centroids,
-                            scale=self.scale,
-                            mse_bits=self.tq_config.key_mse_bits,
-                            key_packed_size=self.tq_config.key_packed_size,
-                            value_quant_bits=(
-                                self.tq_config.effective_value_quant_bits
-                            ),
-                            key_fp8=self.tq_config.key_fp8,
-                            norm_correction=self.tq_config.norm_correction,
-                            PiT=PiT,
-                        )
+                        # The current MTP chunk is already present in the
+                        # compressed cache, but reading it back changes the
+                        # speculative logits. Keep its raw K/V and merge it
+                        # with attention over the compressed prefix.
+                        if _SPEC_CONTINUATION_DECODE_FASTPATH and q_len > 1:
+                            out = self._spec_continuation_decode_attention(
+                                q_seq,
+                                k_seq,
+                                v_seq,
+                                kv_cache,
+                                attn_metadata.block_table[i : i + 1],
+                                cached_len,
+                                Pi,
+                                centroids,
+                                PiT,
+                                _arange_cache,
+                            )
+                        else:
+                            out = None
+
+                        if out is None:
+                            out = triton_turboquant_decode_attention(
+                                query=q_seq,
+                                kv_cache=kv_cache,
+                                block_table=synth_bt,
+                                seq_lens=synth_seq_lens,
+                                Pi=Pi,
+                                centroids=centroids,
+                                scale=self.scale,
+                                mse_bits=self.tq_config.key_mse_bits,
+                                key_packed_size=self.tq_config.key_packed_size,
+                                value_quant_bits=(
+                                    self.tq_config.effective_value_quant_bits
+                                ),
+                                key_fp8=self.tq_config.key_fp8,
+                                norm_correction=self.tq_config.norm_correction,
+                                PiT=PiT,
+                            )
                 else:
                     # Large continuation: dequant cached K/V and use
                     # flash_attn for better throughput.
+                    if (
+                        _TQ_REQUIRE_FLASHINFER_PREFILL
+                        and (
+                            attn_metadata.flashinfer_continuation_wrappers is None
+                            or i
+                            not in attn_metadata.flashinfer_continuation_wrappers
+                        )
+                    ):
+                        raise RuntimeError(
+                            "TurboQuant fast route could not plan FlashInfer "
+                            "continuation prefill; refusing FlashAttention/SDPA "
+                            "fallback."
+                        )
                     out = self._continuation_prefill(
                         layer,
                         q_seq,
@@ -899,10 +1375,142 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         seq_len,
                         Pi,
                         centroids,
+                        flashinfer_wrapper=(
+                            attn_metadata.flashinfer_continuation_wrappers.get(i)
+                            if attn_metadata.flashinfer_continuation_wrappers
+                            else None
+                        ),
                     )
                 output[q_start:q_end] = out.to(query.dtype)
 
         return output
+
+    def _spec_continuation_decode_attention(
+        self,
+        query: torch.Tensor,
+        key_chunk: torch.Tensor,
+        value_chunk: torch.Tensor,
+        kv_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        cached_len: int | torch.Tensor,
+        Pi: torch.Tensor,
+        centroids: torch.Tensor,
+        PiT: torch.Tensor | None,
+        arange_cache: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Merge compressed-prefix attention with raw MTP continuation KV.
+
+        The cache update runs before attention, so reading the current
+        speculative tokens from the quantized cache is lossy.  Computing the
+        prefix once with the TQ kernel and the tiny current chunk with PyTorch
+        preserves MTP quality without falling back to full prefix dequant.
+        """
+        if isinstance(cached_len, int) and cached_len <= 0:
+            return None
+
+        q_len, Hq, D = query.shape
+        Hk = key_chunk.shape[1]
+        if Hk <= 0 or Hq % Hk != 0:
+            return None
+
+        if isinstance(cached_len, int):
+            prefix_seq_lens = torch.full(
+                (q_len,),
+                cached_len,
+                dtype=arange_cache.dtype,
+                device=query.device,
+            )
+            has_prefix = cached_len > 0
+        else:
+            # The capture warmup has no cached prefix. Keep that zero length:
+            # its block table does not name a valid TQ page yet, so forcing a
+            # one-token TQ read would address the sentinel block entry. The
+            # Triton decode stage skips empty splits, and the graph-local
+            # masks below turn its unused output into the exact empty-prefix
+            # state. Replay with a positive cached_len follows the same graph
+            # topology and reads the real compressed prefix.
+            prefix_seq_lens = cached_len.reshape(1).expand(q_len)
+            has_prefix = cached_len > 0
+        prefix_lse = torch.empty(q_len, Hq, dtype=torch.float32, device=query.device)
+        prefix_out = torch.empty_like(query)
+        if _TQ_CUDAGRAPH_SPEC_PREFIX_ROWS and not isinstance(cached_len, int):
+            # All MTP candidates attend to the same compressed prefix. On
+            # SM75, capture the fixed-width candidates as individual B=1 TQ
+            # decodes to avoid the B=4 materialized page-table path. This is
+            # still fully captured and replayed by CUDA Graph; only the graph
+            # topology differs.
+            prefix_seq_len = cached_len.reshape(1)
+            for row in range(q_len):
+                triton_turboquant_decode_attention(
+                    query=query[row : row + 1],
+                    kv_cache=kv_cache,
+                    block_table=block_table,
+                    seq_lens=prefix_seq_len,
+                    Pi=Pi,
+                    centroids=centroids,
+                    scale=self.scale,
+                    mse_bits=self.tq_config.key_mse_bits,
+                    key_packed_size=self.tq_config.key_packed_size,
+                    value_quant_bits=self.tq_config.effective_value_quant_bits,
+                    key_fp8=self.tq_config.key_fp8,
+                    norm_correction=self.tq_config.norm_correction,
+                    PiT=PiT,
+                    output_buf=prefix_out[row : row + 1],
+                    lse_buf=prefix_lse[row : row + 1],
+                    max_num_kv_splits=self.max_num_kv_splits,
+                )
+        else:
+            prefix_bt = block_table.expand(q_len, -1).contiguous()
+            triton_turboquant_decode_attention(
+                query=query,
+                kv_cache=kv_cache,
+                block_table=prefix_bt,
+                seq_lens=prefix_seq_lens,
+                Pi=Pi,
+                centroids=centroids,
+                scale=self.scale,
+                mse_bits=self.tq_config.key_mse_bits,
+                key_packed_size=self.tq_config.key_packed_size,
+                value_quant_bits=self.tq_config.effective_value_quant_bits,
+                key_fp8=self.tq_config.key_fp8,
+                norm_correction=self.tq_config.norm_correction,
+                PiT=PiT,
+                output_buf=prefix_out,
+                lse_buf=prefix_lse,
+                max_num_kv_splits=self.max_num_kv_splits,
+            )
+        if not isinstance(has_prefix, bool):
+            prefix_out = torch.where(
+                has_prefix.reshape(1, 1, 1),
+                prefix_out,
+                torch.zeros_like(prefix_out),
+            )
+            prefix_lse = torch.where(
+                has_prefix.reshape(1, 1),
+                prefix_lse,
+                torch.full_like(prefix_lse, float("-inf")),
+            )
+
+        kv_group_size = Hq // Hk
+        q_float = query.float().view(q_len, Hk, kv_group_size, D)
+        k_float = key_chunk.float()
+        v_float = value_chunk.float()
+        scores = torch.einsum("thgd,shd->thgs", q_float, k_float) * self.scale
+        idx = torch.arange(q_len, device=query.device)
+        causal = idx.view(q_len, 1, 1, 1) >= idx.view(1, 1, 1, q_len)
+        scores = scores.masked_fill(~causal, float("-inf"))
+        current_lse = torch.logsumexp(scores, dim=-1).reshape(q_len, Hq)
+        probs = torch.softmax(scores, dim=-1)
+        current_out = torch.einsum("thgs,shd->thgd", probs, v_float)
+        current_out = current_out.reshape(q_len, Hq, D)
+
+        combined_lse = torch.logaddexp(prefix_lse, current_lse)
+        prefix_weight = torch.exp(prefix_lse - combined_lse).unsqueeze(-1)
+        current_weight = torch.exp(current_lse - combined_lse).unsqueeze(-1)
+        return (
+            prefix_out.float() * prefix_weight
+            + current_out.float() * current_weight
+        ).to(query.dtype)
 
     def _continuation_prefill(
         self,
@@ -916,6 +1524,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         seq_len: int,
         Pi: torch.Tensor,
         centroids: torch.Tensor,
+        flashinfer_wrapper: Any | None = None,
     ) -> torch.Tensor:
         """Handle continuation chunk by dequanting cached K/V from TQ cache.
 
@@ -953,6 +1562,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             # SoA-aware dequant: read the data/metadata-separated SoA cache
             # written by the SoA store. Constants must match the store side.
             _, soa_dequant, _ = _soa_imports()
+            from vllm.v1.attention.ops.turboquant_soa.triton_turboquant_decode import (
+                _use_fp8_e4b15,
+            )
             key_fp8 = self.tq_config.key_fp8
             key_data_bytes = D if key_fp8 else mse_bytes
             data_bytes_per_slot = key_data_bytes + val_data_bytes
@@ -1024,7 +1636,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 KEY_FP8=1 if self.tq_config.key_fp8 else 0,
                 BLOCK_D=BLOCK_D,
                 NORM_CORRECTION=1 if self.tq_config.norm_correction else 0,
-                FP8_E4B15=_use_fp8_e4b15(device.index or 0),
+                FP8_FORMAT=_fp8_format_code(device.index or 0),
                 num_warps=4,
             )
 
@@ -1054,6 +1666,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         k_full[cached_len:] = key_chunk
         v_full[:cached_len] = v_cached_trim.to(qdtype)
         v_full[cached_len:] = val_chunk
+
+        if flashinfer_wrapper is not None:
+            return flashinfer_wrapper.run(query, k_full, v_full)
 
         # Attention: q_len queries attending to seq_len K/V with causal mask
         if _HAS_FLASH_ATTN:

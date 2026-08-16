@@ -155,7 +155,14 @@ def _get_backend_priorities(
         # SM100f defaults to FlashInfer for TRTLLM causal attention, but its non-causal
         # cutlass path (used for dflash attention) is known to have problems.
         # So prefer FlashAttention when non-causal on SM100f.
-        if device_capability.major == 10 and not use_non_causal:
+        if device_capability.major < 8:
+            return [
+                AttentionBackendEnum.FLASHINFER,
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.FLEX_ATTENTION,
+                AttentionBackendEnum.TURBOQUANT,
+            ]
+        elif device_capability.major == 10 and not use_non_causal:
             return [
                 *([AttentionBackendEnum.TRITON_FLASHINFER] if use_mm_prefix else []),
                 AttentionBackendEnum.FLASHINFER,

@@ -40,6 +40,30 @@ if ! command -v uv >/dev/null 2>&1 && [[ -x "${HOME:-}/.local/bin/uv" ]]; then
   export PATH
 fi
 
+# Prefer prepared source trees when a previous build populated .deps. This
+# avoids repeating large Git clones while keeping the upstream FetchContent
+# defaults for a clean checkout.
+if [[ -z "${TRITON_KERNELS_SRC_DIR:-}" ]]; then
+  for candidate in \
+    "$ROOT/.deps/triton_kernels-src/python/triton_kernels/triton_kernels" \
+    "$ROOT/.deps/triton-kernels-tar"/triton-*/python/triton_kernels/triton_kernels; do
+    if [[ -d "$candidate" ]]; then
+      export TRITON_KERNELS_SRC_DIR="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -z "${VLLM_CUTLASS_SRC_DIR:-}" ]]; then
+  for candidate in \
+    "$ROOT/.deps/cutlass-src" \
+    "$ROOT/.deps/cutlass-tar"/cutlass-*/; do
+    if [[ -f "$candidate/include/cutlass/cutlass.h" ]]; then
+      export VLLM_CUTLASS_SRC_DIR="$candidate"
+      break
+    fi
+  done
+fi
+
 is_positive_integer() {
   [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]
 }
@@ -55,8 +79,17 @@ require_primary_env=${REQUIRE_PRIMARY_ENV:-1}
 python_version=${PYTHON_VERSION:-$PRIMARY_PYTHON_VERSION}
 venv_dir=${VENV_DIR:-"$ROOT/.venv"}
 python_bin="$venv_dir/bin/python"
+git_mirror_prefix=${BUILD_GIT_MIRROR_PREFIX:-}
+flashqla_repo=${FLASHQLA_REPO:-https://github.com/weicj/FlashQLA-SM70-SM75.git}
+flashqla_dir=${FLASHQLA_DIR:-"$ROOT/.deps/FlashQLA-SM70-SM75"}
+flashqla_enabled=${FLASHQLA_ENABLED:-1}
+flashqla_clone_timeout=${FLASHQLA_CLONE_TIMEOUT:-180}
+skip_vllm_build=${SKIP_VLLM_BUILD:-0}
 
 is_positive_integer "$max_jobs" || fail "MAX_JOBS must be a positive integer."
+is_positive_integer "$flashqla_clone_timeout" || fail "FLASHQLA_CLONE_TIMEOUT must be a positive integer."
+[[ "$skip_vllm_build" == "0" || "$skip_vllm_build" == "1" ]] ||
+  fail "SKIP_VLLM_BUILD must be 0 or 1."
 require_command uv
 
 if [[ ! -f pyproject.toml || ! -d vllm ]]; then
@@ -101,6 +134,79 @@ check_primary_host() {
   fi
 }
 
+check_cuda_glibc_compatibility() {
+  local header="$CUDA_HOME/targets/x86_64-linux/include/crt/math_functions.h"
+  local glibc_version
+
+  glibc_version=$(ldd --version 2>/dev/null | awk 'NR == 1 { print $NF }')
+  [[ "$glibc_version" =~ ^[0-9]+\.[0-9]+$ ]] || return 0
+  if [[ "$(printf '%s\n%s\n' 2.41 "$glibc_version" | sort -V | head -n 1)" != "2.41" ]]; then
+    return 0
+  fi
+
+  if ! grep -q '__GLIBC_PREREQ(2,41)' "$header" || \
+    ! grep -q '_NV_RSQRT_SPECIFIER' "$header"; then
+    fail "CUDA $PRIMARY_CUDA_VERSION requires toolchain-patches/cuda-13.0-glibc-2.41-rsqrt.patch on glibc $glibc_version. Apply it to CUDA_HOME before rebuilding."
+  fi
+}
+
+prepare_flashqla_sm75() {
+  [[ "$flashqla_enabled" == "1" ]] || {
+    echo "FlashQLA SM70/SM75 backend: disabled (FLASHQLA_ENABLED=$flashqla_enabled)"
+    return 0
+  }
+
+  mkdir -p "$(dirname -- "$flashqla_dir")"
+  if [[ ! -e "$flashqla_dir" ]]; then
+    echo "Fetching FlashQLA SM70/SM75 backend from $flashqla_repo"
+    clone_flashqla() {
+      local source=$1
+      if command -v timeout >/dev/null 2>&1; then
+        timeout --foreground "$flashqla_clone_timeout" \
+          git clone --depth=1 "$source" "$flashqla_dir"
+      else
+        git clone --depth=1 "$source" "$flashqla_dir"
+      fi
+    }
+    if [[ -n "$git_mirror_prefix" ]]; then
+      clone_flashqla "${git_mirror_prefix}${flashqla_repo#https://github.com/}" || {
+        rm -rf "$flashqla_dir"
+        clone_flashqla "$flashqla_repo"
+      }
+    else
+      clone_flashqla "$flashqla_repo"
+    fi
+  fi
+
+  [[ -f "$flashqla_dir/flash_qla/ops/gated_delta_rule/legacy/sm_legacy.py" ]] ||
+    fail "FlashQLA checkout is missing the SM70/SM75 legacy backend"
+
+  "$python_bin" tools/patch_flashqla_sm75_imports.py \
+    "$flashqla_dir" "$ROOT/tools/flashqla_sm75_patches"
+
+  echo "Installing FlashQLA Python package into $venv_dir"
+  uv pip install --python "$python_bin" --no-deps -e "$flashqla_dir"
+
+  local extension_dir="${TORCH_EXTENSIONS_DIR:-$flashqla_dir/.torch_extensions_vllm_flashqla_legacy}"
+  echo "Building FlashQLA SM75 legacy extension in $extension_dir"
+  CUDA_HOME="$CUDA_HOME" \
+  CUDA_PATH="${CUDA_PATH:-$CUDA_HOME}" \
+  CUDACXX="${CUDACXX:-$CUDA_HOME/bin/nvcc}" \
+  TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" \
+  TORCH_EXTENSIONS_DIR="$extension_dir" \
+  PYTHONPATH="$flashqla_dir${PYTHONPATH:+:$PYTHONPATH}" \
+    "$python_bin" - <<'PY'
+from flash_qla.ops.gated_delta_rule.legacy.sm_legacy import _load_ext
+
+extension = _load_ext()
+print(f"FlashQLA extension: {extension.__file__}")
+PY
+
+  export FLASHQLA_DIR="$flashqla_dir"
+  export TORCH_EXTENSIONS_DIR="$extension_dir"
+  export PYTHONPATH="$flashqla_dir${PYTHONPATH:+:$PYTHONPATH}"
+}
+
 echo "============================================================"
 echo "vLLM 2080 Ti Definitive Edition ${FORK_RELEASE} source build"
 echo "Upstream base: vLLM ${BASE_VLLM_VERSION}"
@@ -109,12 +215,25 @@ echo "Build log: $LOG_FILE"
 echo "============================================================"
 
 check_primary_host
+check_cuda_glibc_compatibility
 
 export MAX_JOBS="$max_jobs"
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$MAX_JOBS}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-7.5}"
 export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION:-$cuda_backend}"
 export VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-cuda}"
+
+if [[ -n "$git_mirror_prefix" ]]; then
+  export GIT_CONFIG_COUNT=1
+  export GIT_CONFIG_KEY_0="url.${git_mirror_prefix}https://github.com/.insteadOf"
+  export GIT_CONFIG_VALUE_0="https://github.com/"
+fi
+
+# A source snapshot made with git archive has no SCM metadata. Keep the
+# package version deterministic in that supported validation layout.
+if [[ ! -e .git ]]; then
+  export VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-$BASE_VLLM_VERSION}"
+fi
 
 if [[ ! -x "$python_bin" ]]; then
   echo "Creating Python ${python_version} environment at $venv_dir"
@@ -123,13 +242,27 @@ fi
 
 [[ -x "$python_bin" ]] || fail "Python environment was not created: $python_bin"
 
-echo "Installing and compiling vLLM with uv torch backend $cuda_backend"
-uv pip install --python "$python_bin" -e "." "--torch-backend=$cuda_backend"
+# Build helpers such as ninja are installed into the venv by uv. Keep the
+# editable FlashQLA build and the vLLM build on the same toolchain PATH.
+case ":$PATH:" in
+  *:"$venv_dir/bin":*) ;;
+  *) PATH="$venv_dir/bin:$PATH"; export PATH ;;
+esac
+
+if [[ "$skip_vllm_build" == "1" ]]; then
+  echo "Skipping vLLM build (SKIP_VLLM_BUILD=1); validating existing editable install"
+else
+  echo "Installing and compiling vLLM with uv torch backend $cuda_backend"
+  uv pip install --python "$python_bin" -e "." "--torch-backend=$cuda_backend"
+fi
+
+prepare_flashqla_sm75
 
 echo "Checking the resulting runtime"
 EXPECTED_TORCH_VERSION="$PRIMARY_TORCH_VERSION" \
 EXPECTED_CUDA_BACKEND="$cuda_backend" \
 TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" \
+FLASHQLA_ENABLED="$flashqla_enabled" \
   "$python_bin" - <<'PY'
 import os
 
@@ -152,6 +285,11 @@ if torch.cuda.is_available():
     print(f"GPU count: {torch.cuda.device_count()}")
     for index in range(torch.cuda.device_count()):
         print(f"GPU {index}: capability={torch.cuda.get_device_capability(index)}")
+if os.environ.get("FLASHQLA_ENABLED") == "1":
+    from flash_qla.ops.gated_delta_rule.legacy.sm_legacy import _load_ext
+
+    extension = _load_ext()
+    print(f"FlashQLA extension: {extension.__file__}")
 PY
 
 echo "BUILD SUCCEEDED"

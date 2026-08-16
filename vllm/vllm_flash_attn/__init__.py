@@ -30,11 +30,9 @@ from vllm.vllm_flash_attn.flash_attn_interface import (  # noqa: E402
     is_fa_version_supported,
 )
 
-if not (FA2_AVAILABLE or FA3_AVAILABLE):
-    raise ImportError(
-        "vllm.vllm_flash_attn requires the CUDA flash attention extensions "
-        "(_vllm_fa2_C or _vllm_fa3_C). On ROCm, use upstream flash_attn."
-    )
+# The CUDA extensions are optional for architectures without a supported
+# FlashAttention implementation (for example SM75).  Backend selection checks
+# the availability flags and falls back to Triton or another compatible path.
 
 __all__ = [
     "compile_flash_attn_varlen_func_from_specs",

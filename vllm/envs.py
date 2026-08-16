@@ -47,6 +47,23 @@ if TYPE_CHECKING:
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
+    # SM75 speculative-decode policy.  ``nosync`` is the validated peak-
+    # throughput setting for the TQK8V4 CUDA-graph route; ``safe`` retains
+    # the extra stream synchronizations for debugging/compatibility.
+    VLLM_SM75_SPEC_SYNC_MODE: Literal["auto", "safe", "nosync"] = "auto"
+    # Explicit opt-in for the fast Mamba/GDN speculative full-graph route.
+    # This is intentionally unsafe for general production workloads because
+    # changing acceptance lengths can alter recurrent-state update topology.
+    VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH: bool = False
+    VLLM_TURBOQUANT_DECODE_BLOCK_KV: int = 2
+    VLLM_TURBOQUANT_SPEC_CONTINUATION_DECODE_FASTPATH: bool = False
+    VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE: bool = False
+    VLLM_TURBOQUANT_FLASHINFER_BACKEND: str = "fa2"
+    VLLM_TURBOQUANT_USE_FLASHINFER_PREFILL: bool = True
+    VLLM_TURBOQUANT_FLASHINFER_PREFILL_PLAN_CACHE: bool = True
+    VLLM_TURBOQUANT_FLASHINFER_PREFILL_CUDAGRAPH_SAFE: bool = False
+    VLLM_TURBOQUANT_SM75_FLASHINFER_PREFILL_MIN_QUERY_LEN: int = 1
+    VLLM_TURBOQUANT_SM75_FLASHINFER_CONTINUATION_MIN_QUERY_LEN: int = 1
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -869,6 +886,45 @@ environment_variables: dict[str, Callable[[], Any]] = {
         bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
         if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
         else True
+    ),
+    "VLLM_SM75_SPEC_SYNC_MODE": lambda: (
+        env_with_choices(
+            "VLLM_SM75_SPEC_SYNC_MODE", "auto", ["auto", "safe", "nosync"], False
+        )()
+        or "auto"
+    ).lower(),
+    "VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH": lambda: bool(
+        int(os.getenv("VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH", "0"))
+    ),
+    "VLLM_TURBOQUANT_DECODE_BLOCK_KV": lambda: int(
+        os.getenv("VLLM_TURBOQUANT_DECODE_BLOCK_KV", "2")
+    ),
+    "VLLM_TURBOQUANT_SPEC_CONTINUATION_DECODE_FASTPATH": lambda: bool(
+        int(os.getenv("VLLM_TURBOQUANT_SPEC_CONTINUATION_DECODE_FASTPATH", "0"))
+    ),
+    "VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE": lambda: bool(
+        int(os.getenv("VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE", "0"))
+    ),
+    "VLLM_TURBOQUANT_CUDAGRAPH_SPEC_PREFIX_ROWS": lambda: int(
+        os.getenv("VLLM_TURBOQUANT_CUDAGRAPH_SPEC_PREFIX_ROWS", "0")
+    ),
+    "VLLM_TURBOQUANT_FLASHINFER_BACKEND": lambda: os.getenv(
+        "VLLM_TURBOQUANT_FLASHINFER_BACKEND", "fa2"
+    ),
+    "VLLM_TURBOQUANT_USE_FLASHINFER_PREFILL": lambda: bool(
+        int(os.getenv("VLLM_TURBOQUANT_USE_FLASHINFER_PREFILL", "1"))
+    ),
+    "VLLM_TURBOQUANT_FLASHINFER_PREFILL_PLAN_CACHE": lambda: bool(
+        int(os.getenv("VLLM_TURBOQUANT_FLASHINFER_PREFILL_PLAN_CACHE", "1"))
+    ),
+    "VLLM_TURBOQUANT_FLASHINFER_PREFILL_CUDAGRAPH_SAFE": lambda: bool(
+        int(os.getenv("VLLM_TURBOQUANT_FLASHINFER_PREFILL_CUDAGRAPH_SAFE", "0"))
+    ),
+    "VLLM_TURBOQUANT_SM75_FLASHINFER_PREFILL_MIN_QUERY_LEN": lambda: int(
+        os.getenv("VLLM_TURBOQUANT_SM75_FLASHINFER_PREFILL_MIN_QUERY_LEN", "1")
+    ),
+    "VLLM_TURBOQUANT_SM75_FLASHINFER_CONTINUATION_MIN_QUERY_LEN": lambda: int(
+        os.getenv("VLLM_TURBOQUANT_SM75_FLASHINFER_CONTINUATION_MIN_QUERY_LEN", "1")
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),

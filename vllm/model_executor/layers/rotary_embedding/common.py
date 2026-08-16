@@ -220,7 +220,13 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+        try:
+            from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+        except ModuleNotFoundError:
+            # vLLM's FA rotary helper is not packaged for SM75, where the
+            # FlashAttention CUDA extensions are unavailable. The native path
+            # is compatible with the same tensor contract.
+            return self.forward_native(x, cos, sin)
 
         x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
 

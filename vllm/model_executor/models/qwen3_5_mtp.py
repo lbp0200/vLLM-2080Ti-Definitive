@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3_5 MTP model."""
 
+import os
 from collections.abc import Iterable
 
 import torch
@@ -91,11 +92,19 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         # missing from hf_quant_config.json exclude_modules. Force unquantized.
         # Ref: https://github.com/vllm-project/vllm/pull/38650
         # Ref: https://github.com/NVIDIA/Model-Optimizer/pull/1124
+        bf16_mtp_draft = os.getenv("VLLM_QWOPUS_MTP_BF16_DRAFT") == "1"
+        quant_name = quant_config.get_name() if quant_config else None
         fc_quant = (
             None
-            if (quant_config and quant_config.get_name() == "modelopt_fp4")
+            if quant_name == "modelopt_fp4"
+            or (bf16_mtp_draft and quant_name != "fp8")
             else quant_config
         )
+        if bf16_mtp_draft:
+            logger.info(
+                "VLLM_QWOPUS_MTP_BF16_DRAFT=1: loading Qwen3.5 MTP "
+                "fc/layer weights without the target quantization config."
+            )
         self.fc = ColumnParallelLinear(
             self.config.hidden_size * 2,
             self.config.hidden_size,
@@ -110,21 +119,25 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         # quantization_config.dynamic with "-:pattern" entries. When detected,
         # disable quantization for MTP layers so they use unquantized params.
         original_quant = vllm_config.quant_config
-        if quant_config and quant_config.get_name() not in ("modelopt_fp4",):
+        if bf16_mtp_draft and quant_name != "fp8":
+            vllm_config.quant_config = None
+        elif quant_config and quant_name not in ("modelopt_fp4",):
             hf_qc = getattr(model_config.hf_config, "quantization_config", None)
             if isinstance(hf_qc, dict):
                 dynamic = hf_qc.get("dynamic", {})
                 if any(k.startswith("-:") and "mtp" in k for k in dynamic):
                     vllm_config.quant_config = None
-        self.layers = torch.nn.ModuleList(
-            Qwen3_5DecoderLayer(
-                vllm_config,
-                layer_type="full_attention",
-                prefix=f"{prefix}.layers.{idx}",
+        try:
+            self.layers = torch.nn.ModuleList(
+                Qwen3_5DecoderLayer(
+                    vllm_config,
+                    layer_type="full_attention",
+                    prefix=f"{prefix}.layers.{idx}",
+                )
+                for idx in range(self.num_mtp_layers)
             )
-            for idx in range(self.num_mtp_layers)
-        )
-        vllm_config.quant_config = original_quant
+        finally:
+            vllm_config.quant_config = original_quant
         self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.layers,
             Qwen3NextSparseMoeBlock,

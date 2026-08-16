@@ -67,6 +67,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 # Optional ROCm AITER Triton kernels for the GDN decode path.
 # Availability is checked centrally via rocm_aiter_ops; the actual function
@@ -93,7 +94,9 @@ FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
-) -> tuple[str, Literal["triton", "flashinfer", "cutedsl"]]:
+) -> tuple[
+    str, Literal["triton", "flashinfer", "flashqla_legacy", "cutedsl"]
+]:
     """Resolve GDN prefill backend.
 
     FlashInfer's GDN prefill kernel is chosen when:
@@ -107,6 +110,10 @@ def _resolve_gdn_prefill_backend(
     In-tree CuteDSL GDN prefill kernel is chosen when:
     * "cutedsl" is requested; (opt-in only)
     * Blackwell (SM10.x) with ``head_k_dim == 128``;
+
+    The fork's forward-only FlashQLA legacy kernel is selected on SM70/SM75
+    when its optional extension is installed.  It is the validated Turing
+    prefill route; unsupported varlen calls fall back to Triton in the layer.
     """
     additional_config = vllm_config.additional_config
     backend_cfg = (
@@ -125,6 +132,7 @@ def _resolve_gdn_prefill_backend(
 
     supports_flashinfer = False
     supports_cutedsl = False
+    supports_flashqla_legacy = False
 
     if current_platform.is_device_capability(90):
         supports_flashinfer = True
@@ -143,8 +151,30 @@ def _resolve_gdn_prefill_backend(
         # The in-tree CuteDSL kernel targets SM100 only, so it stays off here.
         supports_flashinfer = True
 
+    if current_platform.is_device_capability(
+        (7, 0)
+    ) or current_platform.is_device_capability((7, 5)):
+        try:
+            from flash_qla.ops.gated_delta_rule.legacy import (
+                chunk_gated_delta_rule_fwd_legacy,
+            )
+
+            supports_flashqla_legacy = chunk_gated_delta_rule_fwd_legacy is not None
+        except (ImportError, OSError, RuntimeError, ValueError):
+            # FlashQLA is an optional SM75 build dependency.  Keep the stock
+            # Triton route usable when it is not present.
+            supports_flashqla_legacy = False
+
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
         return backend, "flashinfer"
+    if backend in ["flashqla_legacy", "auto"] and supports_flashqla_legacy:
+        return backend, "flashqla_legacy"
+    if backend == "flashqla_legacy" and not supports_flashqla_legacy:
+        logger.warning_once(
+            "GDN prefill backend 'flashqla_legacy' is selected but the "
+            "SM70/SM75 FlashQLA extension is unavailable; falling back to "
+            "Triton/FLA."
+        )
     if backend == "cutedsl" and supports_cutedsl:
         return backend, "cutedsl"
     return backend, "triton"
@@ -170,6 +200,7 @@ def _log_gdn_backend_decision(
 
     chosen = {
         "flashinfer": "FlashInfer",
+        "flashqla_legacy": "FlashQLA legacy SM70/SM75",
         "cutedsl": "CuteDSL",
         "triton": "Triton/FLA",
     }[active_backend]
@@ -237,6 +268,45 @@ def fi_chunk_gated_delta_rule(
         return result.unsqueeze(0), None
 
 
+def flashqla_legacy_chunk_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    output_final_state: bool,
+    use_qk_l2norm_in_kernel: bool = True,
+):
+    """Run the forward-only FlashQLA kernel used by SM70/SM75 builds."""
+    from flash_qla.ops.gated_delta_rule.legacy import (
+        chunk_gated_delta_rule_fwd_legacy,
+    )
+
+    if use_qk_l2norm_in_kernel:
+        q = l2norm_fwd(q)
+        k = l2norm_fwd(k)
+
+    output_dtype = v.dtype
+    state_dtype = initial_state.dtype
+    scale = q.shape[-1] ** -0.5
+    output, final_state = chunk_gated_delta_rule_fwd_legacy(
+        q.to(torch.float32).contiguous(),
+        k.to(torch.float32).contiguous(),
+        v.to(torch.float32).contiguous(),
+        g.to(torch.float32).contiguous(),
+        beta.to(torch.float32).contiguous(),
+        scale,
+        initial_state.to(torch.float32).contiguous(),
+    )
+    output = output.to(output_dtype)
+    if output_final_state:
+        final_state = final_state.to(state_dtype)
+    else:
+        final_state = None
+    return output, final_state
+
+
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
@@ -255,6 +325,8 @@ class ChunkGatedDeltaRule(CustomOp):
 
         if active_backend == "flashinfer":
             self._forward_method = self.forward_cuda
+        elif active_backend == "flashqla_legacy":
+            self._forward_method = self.forward_flashqla_legacy
         elif active_backend == "cutedsl":
             self._forward_method = self.forward_cutedsl
         else:
@@ -308,6 +380,66 @@ class ChunkGatedDeltaRule(CustomOp):
         core_attn_out: torch.Tensor | None = None,
     ):
         return fla_chunk_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            core_attn_out=core_attn_out,
+        )
+
+    def forward_flashqla_legacy(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.Tensor | None = None,
+        chunk_indices: torch.Tensor | None = None,
+        chunk_offsets: torch.Tensor | None = None,
+        use_qk_l2norm_in_kernel: bool = True,
+        core_attn_out: torch.Tensor | None = None,
+    ):
+        # The legacy extension handles one contiguous sequence.  Preserve
+        # correctness for mixed/varlen scheduling by using the in-tree FLA
+        # implementation for all other metadata shapes.
+        if (
+            q.ndim == 4
+            and k.ndim == 4
+            and v.ndim == 4
+            and q.shape[0] == 1
+            and (cu_seqlens is None or int(cu_seqlens.numel()) == 2)
+        ):
+            output, final_state = flashqla_legacy_chunk_gated_delta_rule(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            )
+            if core_attn_out is not None:
+                out_flat = output.squeeze(0).reshape(-1)
+                core_flat = core_attn_out.reshape(-1)
+                core_flat[: out_flat.numel()].copy_(out_flat)
+            return output, final_state
+
+        logger.warning_once(
+            "FlashQLA legacy GDN prefill received unsupported varlen/chunked "
+            "metadata; falling back to Triton/FLA for this call."
+        )
+        return self.forward_native(
             q=q,
             k=k,
             v=v,
@@ -1366,6 +1498,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=spec_query_start_loc,
                 max_query_len=spec_state_indices_tensor.size(-1),
+                null_block_id=PAD_SLOT_ID,
                 validate_data=False,
             )
 
@@ -1384,6 +1517,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 has_initial_state=has_initial_state,
                 cache_indices=non_spec_state_indices_tensor,
                 query_start_loc=non_spec_query_start_loc,
+                null_block_id=PAD_SLOT_ID,
                 metadata=attn_metadata,
             ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
@@ -1397,6 +1531,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index]
                     : attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
                 ],
+                null_block_id=PAD_SLOT_ID,
                 validate_data=True,
             )
         else:
@@ -1484,6 +1619,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
+                    null_block_id=PAD_SLOT_ID,
                 )
             )
         else:
@@ -1509,6 +1645,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 ],
                 ssm_state_indices=non_spec_state_indices_tensor,
                 use_qk_l2norm_in_kernel=True,
+                null_block_id=PAD_SLOT_ID,
             )
         else:
             core_attn_out_decode = None
@@ -1568,6 +1705,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ],
                     ssm_state_indices=non_spec_state_indices_tensor,
                     use_qk_l2norm_in_kernel=True,
+                    null_block_id=PAD_SLOT_ID,
                 )
             )
         else:
@@ -1691,6 +1829,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.conv1d.bias,
             self.activation,
             conv_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
+            null_block_id=PAD_SLOT_ID,
             validate_data=False,
         )
         out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
@@ -1705,6 +1844,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             out=out_buf,
             ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
             use_qk_l2norm_in_kernel=True,
+            null_block_id=PAD_SLOT_ID,
         )
         return
 

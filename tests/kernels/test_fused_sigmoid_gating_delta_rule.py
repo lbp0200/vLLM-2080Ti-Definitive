@@ -11,8 +11,82 @@ from vllm.third_party.flash_linear_attention.ops import (
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 DEVICE = current_platform.device_type
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
+def test_fused_sigmoid_gating_accepts_gdn_state_slot_zero() -> None:
+    torch.manual_seed(11)
+    device = torch.device("cuda")
+    dtype = torch.float16
+    batch_size = 2
+    num_heads = value_heads = 1
+    key_dim = value_dim = 16
+
+    q = torch.randn(1, batch_size, num_heads, key_dim, device=device, dtype=dtype)
+    q[:, 1].copy_(q[:, 0])
+    k = torch.randn_like(q)
+    k[:, 1].copy_(k[:, 0])
+    v = torch.randn(
+        1, batch_size, value_heads, value_dim, device=device, dtype=dtype
+    )
+    v[:, 1].copy_(v[:, 0])
+    a = torch.randn(batch_size, value_heads, device=device, dtype=dtype)
+    a[1].copy_(a[0])
+    b = torch.randn(batch_size, value_heads, device=device, dtype=dtype)
+    b[1].copy_(b[0])
+    a_log = torch.randn(value_heads, device=device, dtype=torch.float32)
+    dt_bias = torch.randn(value_heads, device=device, dtype=dtype)
+    initial_state = torch.randn(
+        2, value_heads, value_dim, key_dim, device=device, dtype=dtype
+    )
+    initial_state[1].copy_(initial_state[0])
+    cu_seqlens = torch.tensor([0, 1, 2], device=device, dtype=torch.int32)
+
+    state = initial_state.clone()
+    out, _ = fused_sigmoid_gating_delta_rule_update(
+        A_log=a_log,
+        a=a,
+        b=b,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        initial_state=state,
+        inplace_final_state=True,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=torch.tensor([0, 1], device=device, dtype=torch.int32),
+        use_qk_l2norm_in_kernel=True,
+        null_block_id=PAD_SLOT_ID,
+    )
+
+    torch.testing.assert_close(out[:, 0], out[:, 1], rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(state[0], state[1], rtol=2e-3, atol=2e-3)
+
+    padded_state = initial_state.clone()
+    padded_out, _ = fused_sigmoid_gating_delta_rule_update(
+        A_log=a_log,
+        a=a,
+        b=b,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        initial_state=padded_state,
+        inplace_final_state=True,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=torch.tensor(
+            [0, PAD_SLOT_ID], device=device, dtype=torch.int32
+        ),
+        use_qk_l2norm_in_kernel=True,
+        null_block_id=PAD_SLOT_ID,
+    )
+
+    torch.testing.assert_close(padded_out[:, 0], out[:, 0], rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(padded_state[0], state[0], rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(padded_state[1], initial_state[1], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("tp_size", [1])
