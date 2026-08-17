@@ -3,9 +3,11 @@
 
 ![vLLM 2080 Ti Definitive Edition cover](docs/assets/vllm-2080ti-cover.jpg)
 
-Hardware-focused vLLM fork for dual RTX 2080 Ti 22 GB / SM75 serving. This
-branch is the isolated `0.2.1-pre` migration to upstream vLLM `v0.27.1`, CUDA
-13.0, and PyTorch 2.13. It is not yet a published runtime release.
+Hardware-focused vLLM fork for dual RTX 2080 Ti 22 GB / SM75 serving. This is
+the `vllm-2080ti-definitive-0.2.x` maintenance branch: the public `0.2.x`
+prerelease line rebased on upstream vLLM `v0.27.1`, CUDA 13.0, and PyTorch
+2.13. It is not the stable production default; `v0.1.15` remains the stable
+CUDA 12.8 / PyTorch 2.11 line.
 
 This project preserves the SM75-specific source changes, launcher profiles,
 and benchmark evidence needed to reproduce the dual-2080-Ti TP=2 stack. It is
@@ -18,6 +20,9 @@ Language: English | [Simplified Chinese](README.zh-CN.md)
 
 Fork release: `0.2.1-pre`
 Base vLLM: `0.27.1`
+
+Branch: [`vllm-2080ti-definitive-0.2.x`](https://github.com/weicj/vLLM-2080Ti-Definitive/tree/vllm-2080ti-definitive-0.2.x)
+Prerelease snapshot: [v0.2.1-pre](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.1-pre)
 
 ## Why RTX 2080 Ti For LLM Inference?
 
@@ -40,9 +45,9 @@ Marlin, FlashInfer/FlashQLA, TurboQuant/INT8 KV, MTP, and CUDA Graph support.
 
 ## Status
 
-The `0.2.1-pre` target is Ubuntu 26.04 or later, Linux kernel 7 or later,
-GCC/G++ 15, CUDA 13.0, and PyTorch 2.13. The maintained `v0.1.x` branch remains
-the compatibility route for CUDA 12.8 and PyTorch 2.11.
+The `0.2.x` target is Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++
+15, CUDA 13.0, and PyTorch 2.13. The default `v0.1.15` line remains the
+compatibility route for CUDA 12.8, PyTorch 2.11, older kernels, and GCC 12/13/14.
 
 The dual-2080-Ti CUDA Graph validation is recorded in
 [the migration report](docs/2080ti-0.2.1-pre-validation.md). It includes the
@@ -66,26 +71,41 @@ means partial or historical evidence; unsupported means a known missing path.
 
 ### Qwen3.8 27B
 
-Qwen3.8 27B is the active `0.2.1-pre` SM75 validation lane. The official FP8
-checkpoint runs TP=2 on the NVLink pair through the Marlin weight-only path,
-FP16 KV cache, FlashInfer/FlashQLA attention, and CUDA Graphs. The current
-candidate checkpoint outcomes are listed below; exact benchmark evidence and
-limitations belong in the [migration report](docs/2080ti-0.2.1-pre-validation.md).
+Qwen3.8 27B is the active SM75 validation lane. Every row below was launched
+through the listed shipped profile on the physical dual-2080-Ti NVLink pair
+with TP=2 and non-eager CUDA Graph execution. The figures are the highest valid
+prefill / decode result from three independent 4K-input, 128-output requests
+with distinct prompts. Prefix-cache hits and failed quality probes are excluded.
 
-The broader Qwen3.x 27B feature surface below is retained from the mature
-`v0.1.x` profile line. It is compatibility evidence, not a declaration that
-every row has already been promoted to CUDA 13.
+| Checkpoint | Shipped profile (`PROFILE`, `MODE`) | 4K/128 prefill / decode tok/s |
+| --- | --- | ---: |
+| [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | `qwen3.8-27b/normal/fp8/fp16kv-128K-mtp3-text-only.env`, `normal` | 1496.95 / 83.90 |
+| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/normal/fp8/fp16kv-144K-nomtp-text-only.env`, `normal` | 1501.39 / 30.40 |
+| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/fast/fp8/tqk8v4-256K-mtp3-text-only.env`, `fast` | 1525.37 / 83.51 |
+| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/normal/fp8/fp16kv-104K-mtp3-text-image.env`, `normal` | 1506.86 / 82.88 |
+| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/fast/fp8/tqk8v4-240K-mtp3-text-image.env`, `fast` | 1355.04 / 73.48 |
+| [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | `qwen3.8-27b/normal/nvfp4/fp8kv-240K-nomtp-text-only.env`, `normal` | 1421.10 / 38.89 |
+| unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-only.env`, `fast` | 1411.91 / 102.60 |
+| unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/normal/nvfp4/fp8kv-240K-mtp3-text-image.env`, `normal` | 1266.09 / 55.69 |
+| unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-image.env`, `fast` | 1276.92 / 83.99 |
 
-| Feature | FP16 KV | INT8 KV | TurboQuant KV |
-| --- | --- | --- | --- |
-| Marlin weight route | Validated FP8/INT4/NVFP4 | Validated FP8/INT4/NVFP4 | Validated FP8/INT4/NVFP4 |
-| MTP decoding | Validated | Validated | Validated |
-| Native 256K context | Validated | Validated | Validated |
-| YaRN extension | Not a target route | Validated | Not a target route |
-| Non-eager / CUDA Graph | Validated | Partial | Validated |
-| Fast prefill route | FlashQLA / FlashInfer | FlashQLA / FlashInfer | FlashQLA / FlashInfer |
-| Multimodal image serving | Validated | Validated | Validated |
-| Profile status | normal / fast / safe | normal / safe | fast |
+The FP8 and Unsloth NVFP4 pure-text routes passed the `PROFILE_OK` quality
+probe and produced exactly 128/128 output in the measured runs. The official
+FP8 route uses Marlin weight-only FP8 with FP16 KV or TurboQuant K8V4; the
+Unsloth checkpoint uses `compressed-tensors`, SM75 Marlin NVFP4/FP8 linear
+subsets, and FP8 KV or TurboQuant K8V4 as listed.
+
+The following candidates have short-route evidence but are **experimental**, not
+promoted deployment profiles: `pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB` uses a
+different ModelOpt format and its own `qwen27b/experimental/nvfp4` profiles;
+`RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP` uses the 32K
+`qwen27b/experimental/int8-w8a8` profiles. Neither inherits quality or capacity
+claims from the formal FP8/Unsloth routes. MXFP4 remains unsupported on SM75
+because the required upstream Marlin kernel variants are not generated there.
+
+See the [testing call](docs/0.2.1-pre-testing-call.md) for the complete
+profile-first evidence matrix and the [migration report](docs/2080ti-0.2.1-pre-validation.md)
+for graph modes, controlled comparisons, regression tests, and known limits.
 
 ### Qwen3.x 35B FP8
 
@@ -106,17 +126,18 @@ cu130 evidence are documented in [Gemma4 SM75 support notes](docs/gemma4-sm75-su
 
 ## Tested Model Checkpoints
 
-This is the intentionally narrow `0.2.1-pre` checkpoint list. "Validated"
-means the stated normal/fast short route completed on the physical dual 2080
-Ti NVLink pair; it does not claim all contexts, KV dtypes, or MTP settings.
-The 35B row is retained `v0.1.x` evidence and is explicitly not cu130
-promotion evidence.
+This is the intentionally narrow `0.2.x` checkpoint list. "Validated" means
+the listed shipped profile completed on the physical dual-2080-Ti NVLink pair;
+it does not claim every context, KV dtype, or MTP setting for that checkpoint.
+The 35B row is retained `v0.1.x` evidence and is explicitly not cu130 promotion
+evidence.
 
 | Model route | Weight route | Model cards | Status |
 | --- | --- | --- | --- |
-| Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | Validated on the `0.2.1-pre` FP16-KV CUDA Graph route |
-| Qwen3.8 27B | NVFP4 | [pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB](https://huggingface.co/pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB) | Validated, normal and fast short routes |
-| Qwen3.8 27B | INT8 W8A8 | [RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP](https://huggingface.co/RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP) | Validated, normal and fast short routes |
+| Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | Validated formal text-only and text+image profiles |
+| Qwen3.8 27B | NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | Validated formal text-only and text+image profiles |
+| Qwen3.8 27B | NVFP4 | [pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB](https://huggingface.co/pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB) | Experimental ModelOpt short-route evidence only |
+| Qwen3.8 27B | INT8 W8A8 | [RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP](https://huggingface.co/RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP) | Experimental 32K short-route evidence only |
 | Qwen3.x 35B | FP8 | [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8)<br>[Jackrong/Qwopus3.6-35B-A3B-Coder-FP8](https://huggingface.co/Jackrong/Qwopus3.6-35B-A3B-Coder-FP8)<br>[kyr0/Ornith-35B-FP8-E4M3-MTP](https://huggingface.co/kyr0/Ornith-35B-FP8-E4M3-MTP) | Validated on `v0.1.x`; cu130 revalidation pending |
 
 ## Build And Launch
@@ -126,7 +147,7 @@ Clone this repository and use the migration build entry point:
 ```bash
 git clone https://github.com/weicj/vLLM-2080Ti-Definitive.git
 cd vLLM-2080Ti-Definitive
-git switch migration/0.2.1-pre-v0271
+git switch --track origin/vllm-2080ti-definitive-0.2.x
 ./build.sh
 ```
 
@@ -152,7 +173,7 @@ separately from the profile and pin the physical 2080 Ti pair with
 ```bash
 CUDA_DEVICE_ORDER=PCI_BUS_ID \
 MODEL_DIR=/path/to/checkpoint \
-PROFILE=qwen27b/fast/fp8/fp16kv-112K-mtp3-text-only.env \
+PROFILE=qwen3.8-27b/fast/fp8/tqk8v4-256K-mtp3-text-only.env \
 MODE=fast GPU_DEVICES=4,5 TP_SIZE=2 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
@@ -165,7 +186,7 @@ Use `launcher.sh --print-config` before starting a modified route.
 
 Start with [the Profile Guide](profiles/README.md). Profiles use the layout
 `profiles/<model>/<mode>/<weight>/<route>.env`; for example,
-`qwen27b/normal/int4/fp16kv-256K-mtp3-text-only.env`,
+`qwen3.8-27b/normal/fp8/fp16kv-128K-mtp3-text-only.env`,
 `qwen35b/aggressive/fp8/fp16kv-256K-nomtp-text-only.env`, and
 `qwen35b/normal/fp8/fp16kv-136K-nomtp-text-image.env`.
 

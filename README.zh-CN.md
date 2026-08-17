@@ -3,9 +3,10 @@
 
 ![vLLM 2080 Ti Definitive Edition 题图](docs/assets/vllm-2080ti-cover.jpg)
 
-面向双 RTX 2080 Ti 22 GB / SM75 推理的硬件定向 vLLM fork。本分支是独立的
-`0.2.1-pre` 迁移验证：上游 vLLM `v0.27.1`、CUDA 13.0 和 PyTorch 2.13；尚不是
-正式发布的运行时版本。
+面向双 RTX 2080 Ti 22 GB / SM75 推理的硬件定向 vLLM fork。本分支是
+`vllm-2080ti-definitive-0.2.x` 维护线：基于上游 vLLM `v0.27.1`、CUDA 13.0 和
+PyTorch 2.13 的公开 `0.2.x` 预发布线。它不是稳定生产默认版本；`v0.1.15` 仍是稳定的
+CUDA 12.8 / PyTorch 2.11 线路。
 
 项目保留复现双 2080 Ti TP=2 栈所需的 SM75 专用源码修改、launcher profile 和
 测试证据。它基于上游 vLLM；再发布派生版本时必须保留上游许可证、上游署名以及
@@ -17,6 +18,9 @@
 
 Fork 版本：`0.2.1-pre`
 基础 vLLM：`0.27.1`
+
+分支：[`vllm-2080ti-definitive-0.2.x`](https://github.com/weicj/vLLM-2080Ti-Definitive/tree/vllm-2080ti-definitive-0.2.x)
+预发布快照：[v0.2.1-pre](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.1-pre)
 
 ## 为什么用 RTX 2080 Ti 做 LLM 推理？
 
@@ -38,9 +42,9 @@ Graph，把这些硬件资源转成可用的 serving 栈。
 
 ## 当前状态
 
-`0.2.1-pre` 的目标环境是 Ubuntu 26.04 及以上、Linux kernel 7 及以上、
-GCC/G++ 15、CUDA 13.0 与 PyTorch 2.13。维护中的 `v0.1.x` 分支仍是 CUDA 12.8
-和 PyTorch 2.11 的兼容路线。
+`0.2.x` 的目标环境是 Ubuntu 26.04 及以上、Linux kernel 7 及以上、GCC/G++ 15、
+CUDA 13.0 与 PyTorch 2.13。默认的 `v0.1.15` 线路仍是 CUDA 12.8、PyTorch 2.11、
+较早 kernel 以及 GCC 12/13/14 的兼容路线。
 
 双 2080 Ti 的 CUDA Graph 验证记录在
 [迁移验证报告](docs/2080ti-0.2.1-pre-validation.md)：其中包含实际显卡选择规则、
@@ -61,24 +65,37 @@ GCC/G++ 15、CUDA 13.0 与 PyTorch 2.13。维护中的 `v0.1.x` 分支仍是 CUD
 
 ### Qwen3.8 27B
 
-Qwen3.8 27B 是 `0.2.1-pre` 当前正在验证的 SM75 主线。官方 FP8 checkpoint 已在
-NVLink 双卡 TP=2 下走通 Marlin weight-only、FP16 KV cache、FlashInfer/FlashQLA
-attention 和 CUDA Graph。候选 checkpoint 的结果见下表；精确测试数据和限制以
-[迁移验证报告](docs/2080ti-0.2.1-pre-validation.md) 为准。
+Qwen3.8 27B 是当前 SM75 验证主线。下表每一行均通过列出的项目内 profile，在物理双
+2080 Ti NVLink、TP=2、非 eager CUDA Graph 下启动。数据取三次独立 4K 输入、128 输出、
+不同 prompt 请求中的最高有效 prefill / decode；prefix cache 命中和质量探针失败的运行
+不计入。
 
-下方 Qwen3.x 27B 能力矩阵保留自成熟的 `v0.1.x` profile 路线，是兼容性证据，
-不表示每一行都已经提升到 CUDA 13。
+| Checkpoint | 已发布 profile（`PROFILE`、`MODE`） | 4K/128 prefill / decode tok/s |
+| --- | --- | ---: |
+| [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | `qwen3.8-27b/normal/fp8/fp16kv-128K-mtp3-text-only.env`、`normal` | 1496.95 / 83.90 |
+| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/normal/fp8/fp16kv-144K-nomtp-text-only.env`、`normal` | 1501.39 / 30.40 |
+| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/fast/fp8/tqk8v4-256K-mtp3-text-only.env`、`fast` | 1525.37 / 83.51 |
+| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/normal/fp8/fp16kv-104K-mtp3-text-image.env`、`normal` | 1506.86 / 82.88 |
+| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/fast/fp8/tqk8v4-240K-mtp3-text-image.env`、`fast` | 1355.04 / 73.48 |
+| [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | `qwen3.8-27b/normal/nvfp4/fp8kv-240K-nomtp-text-only.env`、`normal` | 1421.10 / 38.89 |
+| unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-only.env`、`fast` | 1411.91 / 102.60 |
+| unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/normal/nvfp4/fp8kv-240K-mtp3-text-image.env`、`normal` | 1266.09 / 55.69 |
+| unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-image.env`、`fast` | 1276.92 / 83.99 |
 
-| 功能 | FP16 KV | INT8 KV | TurboQuant KV |
-| --- | --- | --- | --- |
-| Marlin 权重路线 | 已验证 FP8/INT4/NVFP4 | 已验证 FP8/INT4/NVFP4 | 已验证 FP8/INT4/NVFP4 |
-| MTP 解码 | 已验证 | 已验证 | 已验证 |
-| 原生 256K 上下文 | 已验证 | 已验证 | 已验证 |
-| YaRN 扩展 | 非目标路线 | 已验证 | 非目标路线 |
-| 非 eager / CUDA Graph | 已验证 | 部分支持 | 已验证 |
-| 快速 prefill 路线 | FlashQLA / FlashInfer | FlashQLA / FlashInfer | FlashQLA / FlashInfer |
-| 图像多模态 | 已验证 | 已验证 | 已验证 |
-| Profile 状态 | normal / fast / safe | normal / safe | fast |
+FP8 和 Unsloth NVFP4 纯文本路线都通过 `PROFILE_OK` 质量探针，且实测请求严格输出
+128/128。官方 FP8 路线使用 Marlin weight-only FP8 与 FP16 KV 或 TurboQuant K8V4；
+Unsloth checkpoint 使用 `compressed-tensors`、SM75 Marlin 的 NVFP4/FP8 线性层子集，
+并按表格使用 FP8 KV 或 TurboQuant K8V4。
+
+以下候选仅有短路线证据，属于**实验路线**，不是已提升的部署 profile：
+`pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB` 是不同的 ModelOpt 格式，使用其专属
+`qwen27b/experimental/nvfp4` profile；`RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP`
+使用 32K 的 `qwen27b/experimental/int8-w8a8` profile。它们不能继承正式 FP8/Unsloth
+路线的质量或容量结论。MXFP4 在 SM75 上仍不支持，因为上游未为该架构生成所需 Marlin
+kernel 变体。
+
+完整的 profile-first 证据矩阵见[测试征集](docs/0.2.1-pre-testing-call.zh-CN.md)，
+实际 graph mode、受控对比、回归测试和已知限制见[迁移验证报告](docs/2080ti-0.2.1-pre-validation.md)。
 
 ### Qwen3.x 35B FP8
 
@@ -97,15 +114,16 @@ SM75 发布验证集合中。checkpoint 类型、MTP 要求、KV cache 限制、
 
 ## 已测试模型权重
 
-这是刻意收窄后的 `0.2.1-pre` checkpoint 清单。"已验证"表示该 normal/fast
-短测路线已在物理双 2080 Ti NVLink 上完成；不代表所有上下文、KV dtype 或 MTP
-配置均已验证。35B 一行保留的是 `v0.1.x` 证据，明确不构成 cu130 的提升依据。
+这是刻意收窄后的 `0.2.x` checkpoint 清单。"已验证"表示列出的项目内 profile 已在物理
+双 2080 Ti NVLink 上完成；不代表该 checkpoint 的所有上下文、KV dtype 或 MTP 配置
+都已验证。35B 一行保留的是 `v0.1.x` 证据，明确不构成 cu130 的提升依据。
 
 | 模型路线 | 权重路线 | 模型卡 | 状态 |
 | --- | --- | --- | --- |
-| Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | 已验证 `0.2.1-pre` FP16-KV CUDA Graph 路线 |
-| Qwen3.8 27B | NVFP4 | [pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB](https://huggingface.co/pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB) | 已验证 normal 和 fast 短测 |
-| Qwen3.8 27B | INT8 W8A8 | [RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP](https://huggingface.co/RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP) | 已验证 normal 和 fast 短测 |
+| Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | 已验证正式纯文本和图文 profile |
+| Qwen3.8 27B | NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | 已验证正式纯文本和图文 profile |
+| Qwen3.8 27B | NVFP4 | [pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB](https://huggingface.co/pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB) | 仅实验性 ModelOpt 短路线证据 |
+| Qwen3.8 27B | INT8 W8A8 | [RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP](https://huggingface.co/RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP) | 仅实验性 32K 短路线证据 |
 | Qwen3.x 35B | FP8 | [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8)<br>[Jackrong/Qwopus3.6-35B-A3B-Coder-FP8](https://huggingface.co/Jackrong/Qwopus3.6-35B-A3B-Coder-FP8)<br>[kyr0/Ornith-35B-FP8-E4M3-MTP](https://huggingface.co/kyr0/Ornith-35B-FP8-E4M3-MTP) | `v0.1.x` 已验证；cu130 待复验 |
 
 ## 构建与启动
@@ -115,7 +133,7 @@ SM75 发布验证集合中。checkpoint 类型、MTP 要求、KV cache 限制、
 ```bash
 git clone https://github.com/weicj/vLLM-2080Ti-Definitive.git
 cd vLLM-2080Ti-Definitive
-git switch migration/0.2.1-pre-v0271
+git switch --track origin/vllm-2080ti-definitive-0.2.x
 ./build.sh
 ```
 
@@ -139,7 +157,7 @@ chat template、reasoning 默认值和工具调用设置，并显示服务状态
 ```bash
 CUDA_DEVICE_ORDER=PCI_BUS_ID \
 MODEL_DIR=/path/to/checkpoint \
-PROFILE=qwen27b/fast/fp8/fp16kv-112K-mtp3-text-only.env \
+PROFILE=qwen3.8-27b/fast/fp8/tqk8v4-256K-mtp3-text-only.env \
 MODE=fast GPU_DEVICES=4,5 TP_SIZE=2 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
@@ -152,7 +170,7 @@ profile 只保存路线参数。容量与历史吞吐记录见
 
 从 [Profile 导引](profiles/README.zh-CN.md) 开始选。Profile 按
 `profiles/<model>/<mode>/<weight>/<route>.env` 组织，例如
-`qwen27b/normal/int4/fp16kv-256K-mtp3-text-only.env`、
+`qwen3.8-27b/normal/fp8/fp16kv-128K-mtp3-text-only.env`、
 `qwen35b/aggressive/fp8/fp16kv-256K-nomtp-text-only.env` 和
 `qwen35b/normal/fp8/fp16kv-136K-nomtp-text-image.env`。
 
