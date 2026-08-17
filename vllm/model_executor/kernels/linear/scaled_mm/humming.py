@@ -36,8 +36,12 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not has_humming():
             return False, "Humming is not installed"
 
-        if not current_platform.has_device_capability(75):
-            return False, "Humming only supported on SM75+"
+        # Humming's FP8 W8A16 kernels compile on CUDA for SM75, but their
+        # FP16 x E4M3 epilogues rely on Ampere-era MMA behavior and fail the
+        # NVRTC static assertions on Turing.  Marlin is the validated SM75
+        # fallback for this weight-only route.
+        if not current_platform.has_device_capability(80):
+            return False, "Humming FP8 W8A16 requires SM80+"
 
         return True, None
 

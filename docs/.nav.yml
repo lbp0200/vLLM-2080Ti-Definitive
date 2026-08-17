@@ -4,6 +4,8 @@ nav:
     - usage/README.md
     - 2080 Ti SM75:
       - 0.2.1-pre Migration Validation: 2080ti-0.2.1-pre-validation.md
+      - 0.2.1-pre Test Call: 0.2.1-pre-testing-call.md
+      - 0.2.1-pre 测试征集: 0.2.1-pre-testing-call.zh-CN.md
       - Gemma4 SM75 Support Notes: gemma4-sm75-support.md
     - Getting Started:
       - getting_started/quickstart.md

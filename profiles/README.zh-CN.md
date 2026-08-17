@@ -30,7 +30,16 @@ profiles/
     fast/
       fp8/
       int4/
+    experimental/
+      int8-w8a8/
     user/
+  qwen3.8-27b/
+    normal/
+      fp8/
+      nvfp4/
+    fast/
+      fp8/
+      nvfp4/
   qwen35b/
     normal/
       fp8/
@@ -81,10 +90,63 @@ block 对齐后的 prefix-cache 路径已验证设置。
 | Profile | 兼容模式 | 上下文 | KV | MTP | 消息 | 并发 | 吞吐性能 |
 |---|---|---:|---|---:|---|---:|---:|
 | `qwen27b/normal/fp8/fp16kv-128K-mtp3-text-only.env` | normal | 128K | FP16 | 3 | text-only | 1 | 1619.48 / 84.71 |
+| `qwen27b/normal/fp8/fp16kv-144K-nomtp-text-only.env` | normal | 144K | FP16 | 0 | text-only | 1 | 1529.33 / 30.42 |
 | `qwen27b/normal/fp8/int8kv-252K-mtp3-text-only.env` | normal | 252K | INT8 | 3 | text-only | 1 | 1605.10 / 44.09 |
 | `qwen27b/fast/fp8/fp16kv-112K-mtp3-text-only.env` | fast | 112K | FP16 | 3 | text-only | 1 | 1615.58 / 83.69 |
 | `qwen27b/fast/fp8/tqk8v4-256K-mtp3-text-only.env` | fast | 256K | TQK8V4 | 3 | text-only | 1 | 1615.81 / 81.06 |
-| `qwen27b/fast/fp8/tqk8v4-240K-mtp3-text-image.env` | fast | 240K | TQK8V4 | 3 | text+image | 1 | 1605.61 / 80.67 |
+
+### Qwen3.8 27B 多模态 MTP3（0.2.1-pre 正式 profile）
+
+以下路线在 NVLink 连接的双 RTX 2080 Ti、TP=2 上验证。每条路线均先通过自然图像问答：
+正确识别蓝色方块、橙色圆和 `K7P`。保留的图文路线吞吐为三轮请求中的最高 prefill / decode
+值；每轮为 4K 输入、128 输出，并使用不同 prompt 前缀避开 prefix cache。性能请求仅为固定
+128 token decode 窗口设置 `ignore_eos`。
+FP8 normal 行在提升至 104K 时使用固定输出的合成 4K/128 请求复测；图像问答质量门槛另在下文
+单独记录。
+
+| Checkpoint | Profile | 上下文 | KV | 吞吐性能 |
+|---|---|---:|---|---:|
+| Qwen3.8-27B-FP8 | `qwen3.8-27b/normal/fp8/fp16kv-104K-mtp3-text-image.env` | 104K | FP16 | 1506.86 / 82.88 |
+| Qwen3.8-27B-FP8 | `qwen3.8-27b/fast/fp8/tqk8v4-240K-mtp3-text-image.env` | 240K | TQK8V4 | 1355.04 / 73.48 |
+| Qwen3.8-27B-NVFP4 | `qwen3.8-27b/normal/nvfp4/fp8kv-240K-mtp3-text-image.env` | 240K | FP8 | 1266.09 / 55.69 |
+| Qwen3.8-27B-NVFP4 | `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-image.env` | 240K | TQK8V4 | 1276.92 / 83.99 |
+
+FP8 normal 路线使用 `GPU_UTIL=0.96`，启动时分配 4.04 GiB，并在 CUDA Graph
+profiling 后实测 GPU KV 为 110,784 tokens；留出 block 余量后将正式上下文设为
+104K。三次 4K/128 合成请求均返回 128/128，最高实测 prefill / decode 为
+1506.86 / 82.88 tok/s。
+
+normal NVFP4 使用 `compressed-tensors`，在 SM75 上由 Marlin 处理 NVFP4 与权重仅 FP8
+线性层，并显式使用 FP8 KV。其 240K 受 checkpoint 的 262,144 token 位置上限约束，而不是
+KV 显存：实测 GPU KV 为 426,080 tokens。fast NVFP4 实测 GPU KV 为 515,723 tokens，但同样
+受该位置上限约束。两条 fast 路线均使用 CUDA Graph decode；NVFP4 fast 同时捕获 FULL decode
+和 PIECEWISE 混合 prefill/decode 图。
+
+### Qwen3.8 27B FP8 纯文本（0.2.1-pre 正式 profile）
+
+以下 profile 用于官方 `Qwen/Qwen3.8-27B-FP8`，启用 `LANGUAGE_MODEL_ONLY=1` 与
+`SKIP_MM_PROFILING=1`。它们与上方图文 profile 独立，并保留 CUDA Graph 执行。
+
+| Profile | 上下文 | KV | MTP | CUDA Graph | 实测 GPU KV tokens | 4K/128 prefill / decode tok/s |
+|---|---:|---|---:|---|---:|---:|
+| `qwen3.8-27b/normal/fp8/fp16kv-128K-mtp3-text-only.env` | 128K | FP16 | 3 | PIECEWISE，size 4 | 138,394 | 1496.95 / 83.90 |
+| `qwen3.8-27b/normal/fp8/fp16kv-144K-nomtp-text-only.env` | 144K | FP16 | 0 | FULL_AND_PIECEWISE，size 1 | 152,749 | 1501.39 / 30.40 |
+| `qwen3.8-27b/fast/fp8/tqk8v4-256K-mtp3-text-only.env` | 256K | TQK8V4 | 3 | FULL_AND_PIECEWISE，size 4 | 310,827 | 1525.37 / 83.51 |
+
+每条路线均通过 `PROFILE_OK` 探针和三组不同的 4K/128 合成测试，且完整输出
+128 token；吞吐取其中最高有效值。
+
+### Qwen3.8 27B NVFP4 纯文本（0.2.1-pre 正式 profile）
+
+以下路线使用 `Qwen3.8-27B-NVFP4`、TP=2 和 `LANGUAGE_MODEL_ONLY=1`。normal
+模式明确使用 FP8 KV，fast 模式使用 TurboQuant K8V4。两条路线均通过
+`PROFILE_OK` 质量探针，并在固定 token 的 4K/128 合成测试中严格生成
+128/128；吞吐取三组不同 prompt 变体中的最高有效值。
+
+| Profile | 上下文 | KV | MTP | CUDA Graph | 实测 GPU KV tokens | 4K/128 prefill / decode tok/s |
+|---|---:|---|---:|---|---:|---:|
+| `qwen3.8-27b/normal/nvfp4/fp8kv-240K-nomtp-text-only.env` | 240K | FP8 | 0 | PIECEWISE + FULL decode | 530,720 | 1421.10 / 38.89 |
+| `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-only.env` | 240K | TQK8V4 | 3 | PIECEWISE + FULL decode | 564,130 | 1411.91 / 102.60 |
 
 ### Qwen3.x 35B FP8（旧容量基线）
 
@@ -106,9 +168,32 @@ block 对齐后的 prefix-cache 路径已验证设置。
 | Profile | 兼容模式 | 上下文 | KV | MTP | 消息 | 并发 | 吞吐性能 |
 |---|---|---:|---|---:|---|---:|---:|
 | `qwen27b/normal/int4/fp16kv-256K-mtp3-text-only.env` | normal | 256K | FP16 | 3 | text-only | 1 | 1738.06 / 97.79 |
+| `qwen27b/normal/int4/fp16kv-256K-nomtp-text-only.env` | normal | 256K | FP16 | 0 | text-only | 1 | 等待 0.2.1-pre 重测 |
 | `qwen27b/normal/int4/fp16kv-240K-mtp3-text-image.env` | normal | 240K | FP16 | 3 | text+image | 1 | 1760.14 / 94.48 |
 | `qwen27b/normal/int4/int8kv-two250K-mtp3-text-only.env` | normal | 每工作区 250K | INT8 | 3 | text-only | 2 | 1740.51 / 49.06 |
 | `qwen27b/normal/int4/int8kv-512K-yarn-mtp3-text-only.env` | normal | 512K | INT8 + YaRN | 3 | text-only | 1 | 1734.14 / 48.16 |
 | `qwen27b/fast/int4/fp16kv-256K-mtp3-text-only.env` | fast | 256K | FP16 | 3 | text-only | 1 | 1734.98 / 87.00 |
 | `qwen27b/fast/int4/tqk8v4-256K-mtp3-text-only.env` | fast | 256K | TQK8V4 | 3 | text-only | 1 | 1744.67 / 100.81 |
 | `qwen27b/fast/int4/tqk8v4-two250K-mtp3-text-only.env` | fast | 每工作区 250K | TQK8V4 | 3 | text-only | 2 | 1739.23 / 99.91 |
+
+### Qwen3.8 27B INT8 W8A8（实验性部署路线）
+
+以下 profile 按双 2080 Ti 的实测显存容量设置为 32K，并为 MTP3 图和激活保留余量，
+对应 `RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP`。
+
+| Profile | 兼容模式 | 上下文 | KV | MTP | 消息 | 并发 |
+|---|---|---:|---|---:|---|---:|
+| `qwen27b/experimental/int8-w8a8/fp16kv-32K-mtp3-text-only.env` | normal | 32K | FP16 | 3 | text-only | 1 |
+| `qwen27b/experimental/int8-w8a8/fp16kv-32K-nomtp-text-only.env` | normal | 32K | FP16 | 0 | text-only | 1 |
+| `qwen27b/experimental/int8-w8a8/tqk8v4-32K-mtp3-text-only.env` | fast | 32K | TQK8V4 | 3 | text-only | 1 |
+
+### Qwen3.8 27B NVFP4（实验性 ModelOpt 路线）
+
+这些 profile 用于 `pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB`，必须配套其 ModelOpt
+`MIXED_PRECISION` 权重文件。
+
+| Profile | 兼容模式 | 上下文 | KV | MTP | 消息 | 并发 |
+|---|---|---:|---|---:|---|---:|
+| `qwen27b/experimental/nvfp4/fp16kv-256K-nomtp-text-only.env` | normal | 256K | FP16 | 0 | text-only | 1 |
+| `qwen27b/experimental/nvfp4/fp16kv-128K-mtp3-text-only.env` | normal | 128K | FP16 | 3 | text-only | 1 |
+| `qwen27b/experimental/nvfp4/tqk8v4-128K-mtp3-text-only.env` | fast | 128K | TQK8V4 | 3 | text-only | 1 |

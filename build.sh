@@ -72,8 +72,83 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "Required command not found: $1"
 }
 
+detect_cpu_threads() {
+  local threads
+  threads=$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)
+  if ! is_positive_integer "$threads"; then
+    threads=$(nproc 2>/dev/null || true)
+  fi
+  if ! is_positive_integer "$threads"; then
+    threads=4
+  fi
+  echo "$threads"
+}
+
+detect_memory_gb() {
+  local mem_kb mem_gb
+  mem_kb=$(awk '/MemTotal:/ { print $2 }' /proc/meminfo 2>/dev/null || echo 0)
+  mem_gb=$(( mem_kb / 1024 / 1024 ))
+  if (( mem_gb < 1 )); then
+    mem_gb=1
+  fi
+  echo "$mem_gb"
+}
+
+select_max_jobs() {
+  local threads=$1
+  local mem_gb=$2
+  local cap=${3:-}
+  local reserve_gb=3
+  local per_job_gb=3
+  local mem_limited_jobs
+
+  mem_limited_jobs=$(( (mem_gb - reserve_gb) / per_job_gb ))
+  (( mem_limited_jobs >= 1 )) || mem_limited_jobs=1
+  if [[ -n "$cap" ]]; then
+    (( mem_limited_jobs <= cap )) || mem_limited_jobs=$cap
+  fi
+  (( mem_limited_jobs <= threads )) || mem_limited_jobs=$threads
+
+  echo "$mem_limited_jobs"
+}
+
+validate_max_jobs_range() {
+  local jobs=$1
+  local threads=$2
+  is_positive_integer "$jobs" || fail "MAX_JOBS must be a positive integer."
+  if (( jobs < 1 || jobs > threads )); then
+    fail "MAX_JOBS must be between 1 and CPU_THREADS ($threads)."
+  fi
+}
+
 cuda_backend="cu$(printf '%s' "$PRIMARY_CUDA_VERSION" | cut -d. -f1,2 | tr -d '.')"
-max_jobs=${MAX_JOBS:-24}
+cpu_threads=${CPU_THREADS:-$(detect_cpu_threads)}
+memory_gb=${MEMORY_GB:-$(detect_memory_gb)}
+auto_max_jobs_cap=${BUILD_AUTO_MAX_JOBS_CAP:-8}
+is_positive_integer "$cpu_threads" || fail "CPU_THREADS must be a positive integer when set explicitly."
+is_positive_integer "$memory_gb" || fail "MEMORY_GB must be a positive integer when set explicitly."
+is_positive_integer "$auto_max_jobs_cap" || fail "BUILD_AUTO_MAX_JOBS_CAP must be a positive integer when set explicitly."
+
+if [[ -n "${BUILD_MAX_JOBS:-}" && -n "${MAX_JOBS:-}" && "${BUILD_MAX_JOBS}" != "${MAX_JOBS}" ]]; then
+  fail "BUILD_MAX_JOBS and MAX_JOBS must match when both are set."
+fi
+if [[ -n "${BUILD_MAX_JOBS:-}" ]]; then
+  max_jobs=$BUILD_MAX_JOBS
+  max_jobs_source=env:BUILD_MAX_JOBS
+elif [[ -n "${MAX_JOBS:-}" ]]; then
+  max_jobs=$MAX_JOBS
+  max_jobs_source=env:MAX_JOBS
+else
+  auto_jobs_without_cap=$(select_max_jobs "$cpu_threads" "$memory_gb" "$cpu_threads")
+  max_jobs=$(select_max_jobs "$cpu_threads" "$memory_gb" "$auto_max_jobs_cap")
+  if (( max_jobs < auto_jobs_without_cap )); then
+    max_jobs_source=auto-cap
+  elif (( max_jobs < cpu_threads )); then
+    max_jobs_source=auto-memory
+  else
+    max_jobs_source=auto
+  fi
+fi
 allow_host_mismatch=${ALLOW_HOST_MISMATCH:-0}
 require_primary_env=${REQUIRE_PRIMARY_ENV:-1}
 python_version=${PYTHON_VERSION:-$PRIMARY_PYTHON_VERSION}
@@ -86,7 +161,7 @@ flashqla_enabled=${FLASHQLA_ENABLED:-1}
 flashqla_clone_timeout=${FLASHQLA_CLONE_TIMEOUT:-180}
 skip_vllm_build=${SKIP_VLLM_BUILD:-0}
 
-is_positive_integer "$max_jobs" || fail "MAX_JOBS must be a positive integer."
+validate_max_jobs_range "$max_jobs" "$cpu_threads"
 is_positive_integer "$flashqla_clone_timeout" || fail "FLASHQLA_CLONE_TIMEOUT must be a positive integer."
 [[ "$skip_vllm_build" == "0" || "$skip_vllm_build" == "1" ]] ||
   fail "SKIP_VLLM_BUILD must be 0 or 1."
@@ -211,6 +286,7 @@ echo "============================================================"
 echo "vLLM 2080 Ti Definitive Edition ${FORK_RELEASE} source build"
 echo "Upstream base: vLLM ${BASE_VLLM_VERSION}"
 echo "Target: CUDA ${PRIMARY_CUDA_VERSION} / Torch ${PRIMARY_TORCH_VERSION} / SM75"
+echo "Build parallelism: ${max_jobs} (${max_jobs_source}; CPU=${cpu_threads}, memory=${memory_gb}GiB, auto cap=${auto_max_jobs_cap})"
 echo "Build log: $LOG_FILE"
 echo "============================================================"
 
@@ -218,6 +294,10 @@ check_primary_host
 check_cuda_glibc_compatibility
 
 export MAX_JOBS="$max_jobs"
+export BUILD_MAX_JOBS=${BUILD_MAX_JOBS:-$MAX_JOBS}
+export CPU_THREADS="$cpu_threads"
+export MEMORY_GB="$memory_gb"
+export AUTO_MAX_JOBS_CAP="$auto_max_jobs_cap"
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$MAX_JOBS}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-7.5}"
 export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION:-$cuda_backend}"

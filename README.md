@@ -117,7 +117,6 @@ promotion evidence.
 | Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | Validated on the `0.2.1-pre` FP16-KV CUDA Graph route |
 | Qwen3.8 27B | NVFP4 | [pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB](https://huggingface.co/pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB) | Validated, normal and fast short routes |
 | Qwen3.8 27B | INT8 W8A8 | [RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP](https://huggingface.co/RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP) | Validated, normal and fast short routes |
-| Qwen3.8 27B | AWQ-INT4 | [cyankiwi/Qwen3.8-27B-AWQ-INT4](https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4) | Validated, normal and fast short routes; use the official Qwen3.8 tokenizer |
 | Qwen3.x 35B | FP8 | [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8)<br>[Jackrong/Qwopus3.6-35B-A3B-Coder-FP8](https://huggingface.co/Jackrong/Qwopus3.6-35B-A3B-Coder-FP8)<br>[kyr0/Ornith-35B-FP8-E4M3-MTP](https://huggingface.co/kyr0/Ornith-35B-FP8-E4M3-MTP) | Validated on `v0.1.x`; cu130 revalidation pending |
 
 ## Build And Launch
@@ -128,12 +127,14 @@ Clone this repository and use the migration build entry point:
 git clone https://github.com/weicj/vLLM-2080Ti-Definitive.git
 cd vLLM-2080Ti-Definitive
 git switch migration/0.2.1-pre-v0271
-MAX_JOBS=24 ./build.sh
+./build.sh
 ```
 
 `build.sh` creates `.venv`, installs the target dependencies, compiles the CUDA
 extensions, and records the build output under `build-logs/`. It fails closed
-when the target compiler, kernel, or CUDA requirements are not met.
+when the target compiler, kernel, or CUDA requirements are not met. Its default
+parallelism is selected from the host CPU and memory; set `MAX_JOBS` or
+`BUILD_MAX_JOBS` only to deliberately override that choice.
 
 After a successful build, start and manage the service through the launcher:
 

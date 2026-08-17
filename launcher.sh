@@ -3550,22 +3550,12 @@ cold_compile_admission_failure() {
   return 0
 }
 
-cold_compile_prewarm_len() {
-  local log_file=$1
-  local target=${MAX_MODEL_LEN:-0}
-  local estimate len
-
-  [[ "$target" =~ ^[0-9]+$ && "$target" -gt 0 ]] || return 1
-  estimate=$(grep -Eo 'estimated maximum model length is [0-9]+' "$log_file" 2>/dev/null | awk '{print $NF}' | tail -n 1)
-  if [[ "$estimate" =~ ^[0-9]+$ && "$estimate" -gt 4096 ]]; then
-    len=$((estimate - 4096))
-  else
-    len=$((target * 4 / 5))
-  fi
-  (( len > 4096 )) || return 1
-  len=$((len / 1024 * 1024))
-  (( len >= 4096 && len < target )) || return 1
-  echo "$len"
+cold_compile_prewarm_candidates() {
+  # Prewarm only needs to populate the compile cache.  Keeping the temporary
+  # instance at 8K avoids allocating the full-context KV cache, especially for
+  # MTP routes that also load a draft model.
+  [[ "${MAX_MODEL_LEN:-0}" =~ ^[0-9]+$ && "${MAX_MODEL_LEN:-0}" -gt 8192 ]] || return 1
+  printf '8192\n'
 }
 
 run_compile_prewarm() {
@@ -3779,12 +3769,20 @@ launch_server() {
   local ready_rc=0
   wait_for_ready "$log_file" "$url_host" || ready_rc=$?
   if [[ "$ready_rc" != "0" ]]; then
-    local prewarm_len retry_rc
+    local prewarm_candidates prewarm_len retry_rc prewarm_ok=0
     if cold_compile_admission_failure "$log_file"; then
-      prewarm_len=$(cold_compile_prewarm_len "$log_file" || true)
-      if [[ -n "$prewarm_len" ]]; then
+      prewarm_candidates=$(cold_compile_prewarm_candidates "$log_file" || true)
+      if [[ -n "$prewarm_candidates" ]]; then
         cleanup_failed_launch "$pid_file"
-        if run_compile_prewarm "$host_arg" "$url_host" "$prewarm_len"; then
+        while IFS= read -r prewarm_len; do
+          [[ -n "$prewarm_len" ]] || continue
+          echo "Trying compile prewarm at max_model_len=$prewarm_len..."
+          if run_compile_prewarm "$host_arg" "$url_host" "$prewarm_len"; then
+            prewarm_ok=1
+            break
+          fi
+        done <<< "$prewarm_candidates"
+        if (( prewarm_ok )); then
           echo
           echo "Retrying original launch after compile prewarm..."
           local old_stamp=$STAMP

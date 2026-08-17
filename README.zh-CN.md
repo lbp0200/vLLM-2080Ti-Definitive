@@ -106,7 +106,6 @@ SM75 发布验证集合中。checkpoint 类型、MTP 要求、KV cache 限制、
 | Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | 已验证 `0.2.1-pre` FP16-KV CUDA Graph 路线 |
 | Qwen3.8 27B | NVFP4 | [pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB](https://huggingface.co/pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB) | 已验证 normal 和 fast 短测 |
 | Qwen3.8 27B | INT8 W8A8 | [RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP](https://huggingface.co/RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP) | 已验证 normal 和 fast 短测 |
-| Qwen3.8 27B | AWQ-INT4 | [cyankiwi/Qwen3.8-27B-AWQ-INT4](https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4) | 已验证 normal 和 fast 短测；使用官方 Qwen3.8 tokenizer |
 | Qwen3.x 35B | FP8 | [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8)<br>[Jackrong/Qwopus3.6-35B-A3B-Coder-FP8](https://huggingface.co/Jackrong/Qwopus3.6-35B-A3B-Coder-FP8)<br>[kyr0/Ornith-35B-FP8-E4M3-MTP](https://huggingface.co/kyr0/Ornith-35B-FP8-E4M3-MTP) | `v0.1.x` 已验证；cu130 待复验 |
 
 ## 构建与启动
@@ -117,11 +116,13 @@ SM75 发布验证集合中。checkpoint 类型、MTP 要求、KV cache 限制、
 git clone https://github.com/weicj/vLLM-2080Ti-Definitive.git
 cd vLLM-2080Ti-Definitive
 git switch migration/0.2.1-pre-v0271
-MAX_JOBS=24 ./build.sh
+./build.sh
 ```
 
 `build.sh` 会创建 `.venv`、安装目标依赖、编译 CUDA 扩展，并把构建输出记录到
-`build-logs/`。目标编译器、kernel 或 CUDA 条件不满足时，它会明确失败。
+`build-logs/`。目标编译器、kernel 或 CUDA 条件不满足时，它会明确失败。默认编译
+并发会根据主机 CPU 与内存自动选择；仅在确有需要时通过 `MAX_JOBS` 或
+`BUILD_MAX_JOBS` 显式覆写。
 
 构建成功后通过 launcher 启动并管理服务：
 
