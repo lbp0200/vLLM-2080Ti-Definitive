@@ -245,7 +245,6 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
-COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/pyproject.toml /pyproject.toml
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
@@ -530,7 +529,6 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/examples /examples
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
-COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/pyproject.toml /pyproject.toml
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 

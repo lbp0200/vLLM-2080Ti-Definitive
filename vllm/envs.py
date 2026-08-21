@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     VLLM_TURBOQUANT_FLASHINFER_PREFILL_CUDAGRAPH_SAFE: bool = False
     VLLM_TURBOQUANT_SM75_FLASHINFER_PREFILL_MIN_QUERY_LEN: int = 1
     VLLM_TURBOQUANT_SM75_FLASHINFER_CONTINUATION_MIN_QUERY_LEN: int = 1
+    VLLM_TQ_RESERVE_PREFILL_WORKSPACE: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -925,6 +926,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_TURBOQUANT_SM75_FLASHINFER_CONTINUATION_MIN_QUERY_LEN": lambda: int(
         os.getenv("VLLM_TURBOQUANT_SM75_FLASHINFER_CONTINUATION_MIN_QUERY_LEN", "1")
+    ),
+    "VLLM_TQ_RESERVE_PREFILL_WORKSPACE": lambda: bool(
+        int(os.getenv("VLLM_TQ_RESERVE_PREFILL_WORKSPACE", "1"))
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),

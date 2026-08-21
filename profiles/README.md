@@ -9,10 +9,10 @@ checkpoint path. Choose the model directory separately in `launcher.sh` or with
 
 The profiles below are carried forward from the maintained v0.1.x CUDA 12.8 /
 Torch 2.11 route for launcher compatibility. Their historical throughput
-figures are not v0.2.1-pre promotion evidence; current cu130 validation is
+figures are not v0.2.1-pre2 promotion evidence; current cu130 validation is
 recorded in `docs/2080ti-0.2.1-pre-validation.md`.
 
-This guide describes profile compatibility, not the `0.2.1-pre` tested
+This guide describes profile compatibility, not the `0.2.1-pre2` tested
 checkpoint matrix. The intentionally limited current list is in the repository
 `README.md`: Qwen3.8 27B candidate checkpoints and the retained Qwen3.x 35B
 FP8 records. Gemma4 route detail is separate in `docs/gemma4-sm75-support.md`.
@@ -91,7 +91,7 @@ blocks.
 
 ### Qwen3.x 27B FP8 (legacy capacity baseline)
 
-These profile capacities and historical figures predate `0.2.1-pre`; consult
+These profile capacities and historical figures predate `0.2.1-pre2`; consult
 the root tested-checkpoint list before selecting a checkpoint for cu130.
 
 | Profile | Compatible modes | Context | KV | MTP | Messages | Seqs | Throughput |
@@ -102,7 +102,7 @@ the root tested-checkpoint list before selecting a checkpoint for cu130.
 | `qwen27b/fast/fp8/fp16kv-112K-mtp3-text-only.env` | fast | 112K | FP16 | 3 | text-only | 1 | 1615.58 / 83.69 |
 | `qwen27b/fast/fp8/tqk8v4-256K-mtp3-text-only.env` | fast | 256K | TQK8V4 | 3 | text-only | 1 | 1615.81 / 81.06 |
 
-### Qwen3.8 27B multimodal MTP3 (formal 0.2.1-pre profiles)
+### Qwen3.8 27B multimodal MTP3 (formal 0.2.1-pre2 profiles)
 
 These routes were verified on the NVLink-connected dual RTX 2080 Ti host with
 TP=2. Each route passed a natural image-answer check before measurement: the
@@ -134,7 +134,7 @@ KV tokens but is constrained by the same checkpoint position limit. Both fast
 routes use CUDA Graph decode; the NVFP4 fast route captures FULL decode plus
 PIECEWISE mixed prefill/decode.
 
-### Qwen3.8 27B FP8 text-only (formal 0.2.1-pre profiles)
+### Qwen3.8 27B FP8 text-only (formal 0.2.1-pre2 profiles)
 
 These profiles run the official `Qwen/Qwen3.8-27B-FP8` checkpoint with
 `LANGUAGE_MODEL_ONLY=1` and `SKIP_MM_PROFILING=1`. They are separate from the
@@ -149,7 +149,7 @@ multimodal profiles above and preserve CUDA Graph execution.
 Each row passed the `PROFILE_OK` probe and three distinct 4K/128 synthetic
 runs with complete 128-token output. Throughput is the highest valid result.
 
-### Qwen3.8 27B NVFP4 text-only (formal 0.2.1-pre profiles)
+### Qwen3.8 27B NVFP4 text-only (formal 0.2.1-pre2 profiles)
 
 These routes use `Qwen3.8-27B-NVFP4` with TP=2 and `LANGUAGE_MODEL_ONLY=1`.
 Normal mode uses explicit FP8 KV; fast mode uses TurboQuant K8V4. Both passed
@@ -177,13 +177,13 @@ They need independent cu130 revalidation before profile promotion.
 
 ### Qwen3.x 27B INT4 (legacy capacity baseline)
 
-These carried-forward INT4 profile figures are not a `0.2.1-pre`
+These carried-forward INT4 profile figures are not a `0.2.1-pre2`
 tested-checkpoint statement.
 
 | Profile | Compatible modes | Context | KV | MTP | Messages | Seqs | Throughput |
 |---|---|---:|---|---:|---|---:|---:|
 | `qwen27b/normal/int4/fp16kv-256K-mtp3-text-only.env` | normal | 256K | FP16 | 3 | text-only | 1 | 1738.06 / 97.79 |
-| `qwen27b/normal/int4/fp16kv-256K-nomtp-text-only.env` | normal | 256K | FP16 | 0 | text-only | 1 | pending 0.2.1-pre rerun |
+| `qwen27b/normal/int4/fp16kv-256K-nomtp-text-only.env` | normal | 256K | FP16 | 0 | text-only | 1 | pending 0.2.1-pre2 rerun |
 | `qwen27b/normal/int4/fp16kv-240K-mtp3-text-image.env` | normal | 240K | FP16 | 3 | text+image | 1 | 1760.14 / 94.48 |
 | `qwen27b/normal/int4/int8kv-two250K-mtp3-text-only.env` | normal | 250K per workspace | INT8 | 3 | text-only | 2 | 1740.51 / 49.06 |
 | `qwen27b/normal/int4/int8kv-512K-yarn-mtp3-text-only.env` | normal | 512K | INT8 + YaRN | 3 | text-only | 1 | 1734.14 / 48.16 |

@@ -334,11 +334,11 @@ To disable the Python code interpreter specifically, omit `code_interpreter` fro
 
 vLLM supports dynamically loading and unloading LoRA adapters at runtime via the `/v1/load_lora_adapter` and `/v1/unload_lora_adapter` API endpoints. This functionality is **not enabled by default** — it requires both `--enable-lora` and the environment variable `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True` to be set.
 
-**Warning:** Dynamic LoRA loading is not a secure operation and should not be enabled in deployments exposed to untrusted clients. If you must enable dynamic LoRA loading, restrict access to the `/v1/load_lora_adapter` and `/v1/unload_lora_adapter` endpoints to trusted administrators only, using a reverse proxy or network-level access controls. Do not expose these endpoints to end users. For details on configuring LoRA adapters, see the [LoRA Adapters documentation](../features/lora.md).
+**Warning:** Dynamic LoRA loading is not a secure operation and should not be enabled in deployments exposed to untrusted clients. If you must enable dynamic LoRA loading, restrict access to the `/v1/load_lora_adapter` and `/v1/unload_lora_adapter` endpoints to trusted administrators only, using a reverse proxy or network-level access controls. Do not expose these endpoints to end users. Configure LoRA adapters only from trusted deployment code.
 
 ## Endpoint Plugins
 
-vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` entry point group (see [Endpoint Plugins](../design/endpoint_plugins.md) for how to write one). An endpoint plugin can register arbitrary FastAPI routes, including routes that reach the engine via `EngineClient.collective_rpc`, so it must be treated as part of the server's trusted code base and not as sandboxed or reviewed input.
+vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` entry point group. An endpoint plugin can register arbitrary FastAPI routes, including routes that reach the engine via `EngineClient.collective_rpc`, so it must be treated as part of the server's trusted code base and not as sandboxed or reviewed input.
 
 **Endpoint plugins are not loaded by default.** Unlike other vLLM plugin groups (`vllm.general_plugins`, `vllm.platform_plugins`, etc.), which load every discovered plugin unless `VLLM_PLUGINS` narrows the set, endpoint plugins load **none** unless `VLLM_PLUGINS` is set and explicitly names them. This mirrors the "off by default in production" posture used for development endpoints gated behind `VLLM_SERVER_DEV_MODE`. Both surfaces are only present when an operator has explicitly opted in.
 

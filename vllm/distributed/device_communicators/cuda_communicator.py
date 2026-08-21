@@ -370,8 +370,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
             assert out is not None
             return out
         ca_comm = self.ca_comm
+        # Do not create/use vLLM custom-all-reduce IPC buffers while CUDA Graph
+        # memory profiling is running. Other all-reduce backends remain intact.
+        from vllm.distributed.device_communicators import custom_all_reduce as _car_mod
+
+        profiling_car_disabled = _car_mod._PROFILING_CAR_DISABLED
         if (
             ca_comm is not None
+            and not profiling_car_disabled
             and not ca_comm.disabled
             and ca_comm.should_custom_ar(input_)
         ):

@@ -7,10 +7,10 @@
 `MODEL_DIR=...` 单独选择。
 
 下面这些 profile 是从维护中的 v0.1.x CUDA 12.8 / Torch 2.11 路线保留的
-launcher 兼容模板。表中的历史吞吐数字不是 0.2.1-pre 的 promotion 证据；
+launcher 兼容模板。表中的历史吞吐数字不是 0.2.1-pre2 的 promotion 证据；
 当前 cu130 验证结果见 `docs/2080ti-0.2.1-pre-validation.md`。
 
-本说明描述的是 profile 兼容性，而不是 `0.2.1-pre` 的已测试 checkpoint 矩阵。
+本说明描述的是 profile 兼容性，而不是 `0.2.1-pre2` 的已测试 checkpoint 矩阵。
 当前刻意收窄后的清单位于仓库根目录 `README.md`：Qwen3.8 27B 候选 checkpoint
 以及保留的 Qwen3.x 35B FP8 记录。Gemma4 路线细节单列在
 `docs/gemma4-sm75-support.zh-CN.md`。
@@ -84,7 +84,7 @@ block 对齐后的 prefix-cache 路径已验证设置。
 
 ### Qwen3.x 27B FP8（旧容量基线）
 
-这些 profile 容量与历史数字早于 `0.2.1-pre`；为 cu130 选择 checkpoint 前，请先
+这些 profile 容量与历史数字早于 `0.2.1-pre2`；为 cu130 选择 checkpoint 前，请先
 查看根目录的已测试权重清单。
 
 | Profile | 兼容模式 | 上下文 | KV | MTP | 消息 | 并发 | 吞吐性能 |
@@ -95,7 +95,7 @@ block 对齐后的 prefix-cache 路径已验证设置。
 | `qwen27b/fast/fp8/fp16kv-112K-mtp3-text-only.env` | fast | 112K | FP16 | 3 | text-only | 1 | 1615.58 / 83.69 |
 | `qwen27b/fast/fp8/tqk8v4-256K-mtp3-text-only.env` | fast | 256K | TQK8V4 | 3 | text-only | 1 | 1615.81 / 81.06 |
 
-### Qwen3.8 27B 多模态 MTP3（0.2.1-pre 正式 profile）
+### Qwen3.8 27B 多模态 MTP3（0.2.1-pre2 正式 profile）
 
 以下路线在 NVLink 连接的双 RTX 2080 Ti、TP=2 上验证。每条路线均先通过自然图像问答：
 正确识别蓝色方块、橙色圆和 `K7P`。保留的图文路线吞吐为三轮请求中的最高 prefill / decode
@@ -122,7 +122,7 @@ KV 显存：实测 GPU KV 为 426,080 tokens。fast NVFP4 实测 GPU KV 为 515,
 受该位置上限约束。两条 fast 路线均使用 CUDA Graph decode；NVFP4 fast 同时捕获 FULL decode
 和 PIECEWISE 混合 prefill/decode 图。
 
-### Qwen3.8 27B FP8 纯文本（0.2.1-pre 正式 profile）
+### Qwen3.8 27B FP8 纯文本（0.2.1-pre2 正式 profile）
 
 以下 profile 用于官方 `Qwen/Qwen3.8-27B-FP8`，启用 `LANGUAGE_MODEL_ONLY=1` 与
 `SKIP_MM_PROFILING=1`。它们与上方图文 profile 独立，并保留 CUDA Graph 执行。
@@ -136,7 +136,7 @@ KV 显存：实测 GPU KV 为 426,080 tokens。fast NVFP4 实测 GPU KV 为 515,
 每条路线均通过 `PROFILE_OK` 探针和三组不同的 4K/128 合成测试，且完整输出
 128 token；吞吐取其中最高有效值。
 
-### Qwen3.8 27B NVFP4 纯文本（0.2.1-pre 正式 profile）
+### Qwen3.8 27B NVFP4 纯文本（0.2.1-pre2 正式 profile）
 
 以下路线使用 `Qwen3.8-27B-NVFP4`、TP=2 和 `LANGUAGE_MODEL_ONLY=1`。normal
 模式明确使用 FP8 KV，fast 模式使用 TurboQuant K8V4。两条路线均通过
@@ -163,12 +163,12 @@ KV 显存：实测 GPU KV 为 426,080 tokens。fast NVFP4 实测 GPU KV 为 515,
 
 ### Qwen3.x 27B INT4（旧容量基线）
 
-这些保留的 INT4 profile 数字不构成 `0.2.1-pre` 的已测试 checkpoint 说明。
+这些保留的 INT4 profile 数字不构成 `0.2.1-pre2` 的已测试 checkpoint 说明。
 
 | Profile | 兼容模式 | 上下文 | KV | MTP | 消息 | 并发 | 吞吐性能 |
 |---|---|---:|---|---:|---|---:|---:|
 | `qwen27b/normal/int4/fp16kv-256K-mtp3-text-only.env` | normal | 256K | FP16 | 3 | text-only | 1 | 1738.06 / 97.79 |
-| `qwen27b/normal/int4/fp16kv-256K-nomtp-text-only.env` | normal | 256K | FP16 | 0 | text-only | 1 | 等待 0.2.1-pre 重测 |
+| `qwen27b/normal/int4/fp16kv-256K-nomtp-text-only.env` | normal | 256K | FP16 | 0 | text-only | 1 | 等待 0.2.1-pre2 重测 |
 | `qwen27b/normal/int4/fp16kv-240K-mtp3-text-image.env` | normal | 240K | FP16 | 3 | text+image | 1 | 1760.14 / 94.48 |
 | `qwen27b/normal/int4/int8kv-two250K-mtp3-text-only.env` | normal | 每工作区 250K | INT8 | 3 | text-only | 2 | 1740.51 / 49.06 |
 | `qwen27b/normal/int4/int8kv-512K-yarn-mtp3-text-only.env` | normal | 512K | INT8 + YaRN | 3 | text-only | 1 | 1734.14 / 48.16 |

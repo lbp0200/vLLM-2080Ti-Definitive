@@ -168,6 +168,43 @@ class ThinkingBudgetStateHolder:
                 return i
         return -1
 
+    @staticmethod
+    def _longest_marker_prefix_suffix(
+        output_tokens: list[int], marker_tokens: list[int]
+    ) -> int:
+        """Return the marker prefix retained at the end of ``output_tokens``."""
+        max_overlap = min(len(output_tokens), max(len(marker_tokens) - 1, 0))
+        for overlap in range(max_overlap, 0, -1):
+            if output_tokens[-overlap:] == marker_tokens[:overlap]:
+                return overlap
+        return 0
+
+    def _reset_after_thinking_block(self, state: dict[str, Any]) -> None:
+        """Reset block-local state while preserving a split ``<think>`` marker."""
+        output_tokens = state.get("output_tok_ids", [])
+        output_length = len(output_tokens)
+        start_overlap = self._longest_marker_prefix_suffix(
+            output_tokens, self.think_start_token_ids
+        )
+        previous_end = state.get("end_thinking", -1)
+        end_boundary = (
+            previous_end + len(self.think_end_token_ids)
+            if previous_end >= 0
+            else 0
+        )
+        state.update(
+            {
+                "in_think": False,
+                "think_count": 0,
+                "continue_thinking": False,
+                "start_thinking": -1,
+                "end_thinking": -1,
+                "scan_offset": max(end_boundary, output_length - start_overlap),
+                "prev_output_length": output_length,
+                "check_count_down": state["thinking_token_budget"],
+            }
+        )
+
     def _init_state_entry(
         self, prompt_tok_ids: list[int] | None, thinking_token_budget: int
     ) -> dict[str, Any]:
@@ -265,10 +302,7 @@ class ThinkingBudgetStateHolder:
             state["in_think"] = False
             state["think_count"] = 0
             state["continue_thinking"] = False
-            state["start_thinking"] = -1
-            state["end_thinking"] = -1
-            state["scan_offset"] = len(state.get("output_tok_ids", []))
-            state["check_count_down"] = state["thinking_token_budget"]
+            self._reset_after_thinking_block(state)
             return
 
         if state["start_thinking"] == -1:
@@ -377,9 +411,7 @@ class ThinkingBudgetStateHolder:
                     state["in_think"] = False
                     state["think_count"] = 0
                     state["continue_thinking"] = False
-                    state["start_thinking"] = -1
-                    state["end_thinking"] = -1
-                    state["scan_offset"] = len(state.get("output_tok_ids", []))
+                    self._reset_after_thinking_block(state)
 
             elif absolute_start_pos >= 0 and not state["continue_thinking"]:
                 # Found think start - entering think mode
@@ -392,9 +424,7 @@ class ThinkingBudgetStateHolder:
                 state["in_think"] = False
                 state["think_count"] = 0
                 state["continue_thinking"] = False
-                state["start_thinking"] = -1
-                state["end_thinking"] = -1
-                state["scan_offset"] = len(state.get("output_tok_ids", []))
+                self._reset_after_thinking_block(state)
 
             elif state["in_think"]:
                 # Continue thinking mode, increment count by new tokens

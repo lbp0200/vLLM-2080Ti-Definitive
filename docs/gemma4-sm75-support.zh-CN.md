@@ -1,12 +1,12 @@
 # Gemma4 SM75 支持说明
 
-本文集中记录 Gemma4 路线细节，因此 `0.2.1-pre` README 不再展开这些内容。
+本文集中记录 Gemma4 路线细节，因此 `0.2.1-pre2` README 不再展开这些内容。
 README 所说的 Gemma4 基础支持，仅表示当前 vLLM 树能够识别相关模型和运行时
 路径；并不表示任意 Gemma4 checkpoint 已成为双 RTX 2080 Ti CUDA 13 的正式路线。
 
 ## 证据范围
 
-`0.2.1-pre` 基于 vLLM `v0.27.1`、CUDA 13.0 和 PyTorch 2.13。目前还没有任何
+`0.2.1-pre2` 基于 vLLM `v0.27.1`、CUDA 13.0 和 PyTorch 2.13。目前还没有任何
 Gemma4 路线完成此分支所需的发布级 SM75 复验。下方实验结果来自旧的 `v0.1.x`
 CUDA 12.8 / PyTorch 2.11 运行时，只能作为起点，不能视为 cu130 的兼容性、性能或
 质量结论。
@@ -21,22 +21,22 @@ CUDA 12.8 / PyTorch 2.11 运行时，只能作为起点，不能视为 cu130 的
 应以 checkpoint 的 `model_type` 与 processor metadata 为准，不能把 Gemma4
 checkpoint 强行作为通用 draft model 加载。
 
-| 模型形态 | 预期用途 | SM75 `0.2.1-pre` 状态 |
+| 模型形态 | 预期用途 | SM75 `0.2.1-pre2` 状态 |
 | --- | --- | --- |
 | `Gemma4ForCausalLM` | 纯文本 Gemma4 checkpoint | 基础运行时支持；无已提升的 SM75 preset |
 | `Gemma4ForConditionalGeneration` | 带 tower 的文本/图像/视频/音频变体 | 基础模型支持；无已验证 SM75 多模态 preset |
 | `Gemma4UnifiedForConditionalGeneration` | 无 encoder 的 unified 变体 | 基础模型支持；无已验证 SM75 多模态 preset |
-| Gemma4 assistant model types | MTP/speculative assistant checkpoint | 必须走 Gemma4 MTP 路径；无 `0.2.1-pre` SM75 提升证据 |
+| Gemma4 assistant model types | MTP/speculative assistant checkpoint | 必须走 Gemma4 MTP 路径；无 `0.2.1-pre2` SM75 提升证据 |
 
-上游模型清单和多模态语义见
-[supported models](models/supported_models.md)。该清单不是硬件专属验证表。
+模型清单和多模态语义应以上游模型注册表与 processor metadata 为准；该清单不是
+硬件专属验证表。
 
 ## 历史实验路线
 
 以下路线明确为实验性路线。它们是本 fork 保留的 Gemma4 checkpoint 记录，但不
-会出现在 `0.2.1-pre` 的已测试权重表中。
+会出现在 `0.2.1-pre2` 的已测试权重表中。
 
-| Target checkpoint | 权重量化 | 历史路线状态 | `0.2.1-pre` 解读 |
+| Target checkpoint | 权重量化 | 历史路线状态 | `0.2.1-pre2` 解读 |
 | --- | --- | --- | --- |
 | [google/gemma-4-31B-it-qat-w4a16-ct](https://huggingface.co/google/gemma-4-31B-it-qat-w4a16-ct) 与 [google/gemma-4-31B-it-qat-q4_0-unquantized-assistant](https://huggingface.co/google/gemma-4-31B-it-qat-q4_0-unquantized-assistant) | QAT target + 对应 assistant | 历史上用于 FP16/default-KV 探索和 assistant MTP 的首选实验目标 | 先复验 target-only 启动与输出，再复验配对 MTP 路线 |
 | [ebircak/gemma-4-31B-it-4bit-W4A16-GPTQ](https://huggingface.co/ebircak/gemma-4-31B-it-4bit-W4A16-GPTQ) | GPTQ-INT4 | 历史实验路线 | 使用前需复验量化加载、graph capture、输出质量和 KV 容量 |
@@ -56,8 +56,7 @@ model。必须使用 vLLM 的 Gemma4 MTP 方法和 checkpoint 匹配的 assistan
 - 冷态 4K/128 prefill 与 decode；以及
 - 真实质量探针，而不是仅测试重复 token 的合成输出。
 
-上游 MTP 实现细节和支持的 assistant model type 见
-[Gemma4 MTP guide](features/speculative_decoding/mtp.md#gemma-4-assistant-models)。
+当前 MTP 实现和 assistant model 支持必须结合对应 vLLM 源码与验证报告确认后才能晋升。
 
 ## 历史 KV 与运行时说明
 
@@ -78,10 +77,8 @@ speculative decoding 在旧 cu128 分支与本 cu130 迁移之间均已变化。
 ## 多模态范围
 
 上游能够识别 Gemma4 多模态模型形态，包括图像和其他 processor 处理的输入路径。
-本 fork 尚未验证 SM75 `0.2.1-pre` 的 text+image、视频或音频部署 preset。多模态
-请求的 encoder 行为也必须与纯文本 decoder CUDA Graph 结果分开测试。尝试路线前
-请先阅读上游的
-[multimodal CUDA Graph notes](design/cuda_graphs_multimodal.md)。
+本 fork 尚未验证 SM75 `0.2.1-pre2` 的 text+image、视频或音频部署 preset。多模态
+请求的 encoder 行为也必须与纯文本 decoder CUDA Graph 结果分开测试。
 
 ## 提升条件
 

@@ -995,6 +995,9 @@ class GPUModelRunner(
             )
         self.layerwise_nvtx_hooks_registered = False
 
+    def _is_drafter_rank(self) -> bool:
+        return hasattr(self, "drafter")
+
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         if self.speculative_config:
@@ -2601,7 +2604,11 @@ class GPUModelRunner(
                 cm.block_table_tensor = _get_block_table(kv_cache_gid)
                 cm.slot_mapping = slot_mappings[kv_cache_gid]
 
-            if self.speculative_config and spec_decode_common_attn_metadata is None:
+            if (
+                self.speculative_config
+                and self._is_drafter_rank()
+                and spec_decode_common_attn_metadata is None
+            ):
                 if isinstance(
                     self.drafter,
                     (
@@ -2616,11 +2623,15 @@ class GPUModelRunner(
                 else:
                     spec_decode_common_attn_metadata = cm
             # Capture per-group block tables for multi-group proposers.
-            if self.speculative_config and isinstance(self.drafter, Step3p5MTPProposer):
+            if self.speculative_config and self._is_drafter_rank() and isinstance(
+                self.drafter, Step3p5MTPProposer
+            ):
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping
                 )
-            elif self.speculative_config and isinstance(self.drafter, Gemma4Proposer):
+            elif self.speculative_config and self._is_drafter_rank() and isinstance(
+                self.drafter, Gemma4Proposer
+            ):
                 self.drafter.set_per_group_block_table(
                     kv_cache_gid, cm.block_table_tensor
                 )
@@ -6184,7 +6195,7 @@ class GPUModelRunner(
             else:
                 hidden_states = outputs
 
-            if self.speculative_config and (
+            if self.speculative_config and self._is_drafter_rank() and (
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_draft_model()
                 or self.speculative_config.uses_extract_hidden_states()
@@ -6659,6 +6670,40 @@ class GPUModelRunner(
 
     @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
+        """Profile CUDA Graph memory with vLLM custom all-reduce disabled."""
+        ca_comm = None
+        ca_comm_disabled_orig = None
+        profiling_flag_orig = None
+        try:
+            from vllm.distributed.device_communicators import custom_all_reduce
+            from vllm.distributed.parallel_state import get_tp_group
+
+            tp_group = get_tp_group()
+            ca_comm = getattr(tp_group.device_communicator, "ca_comm", None)
+            ca_comm_disabled_orig = getattr(ca_comm, "disabled", None)
+            profiling_flag_orig = custom_all_reduce._PROFILING_CAR_DISABLED
+            custom_all_reduce._PROFILING_CAR_DISABLED = True
+            if ca_comm is not None:
+                ca_comm.disabled = True
+        except Exception:
+            # Profiling must remain usable when a communicator is not created
+            # (single GPU, CPU tests, or an unsupported backend).
+            pass
+
+        try:
+            return self._profile_cudagraph_memory_impl()
+        finally:
+            try:
+                from vllm.distributed.device_communicators import custom_all_reduce
+
+                if profiling_flag_orig is not None:
+                    custom_all_reduce._PROFILING_CAR_DISABLED = profiling_flag_orig
+                if ca_comm is not None and ca_comm_disabled_orig is not None:
+                    ca_comm.disabled = ca_comm_disabled_orig
+            except Exception:
+                pass
+
+    def _profile_cudagraph_memory_impl(self) -> int:
         with set_current_vllm_config(self.vllm_config):
             self._init_minimal_kv_cache_for_profiling()
 
@@ -7164,7 +7209,7 @@ class GPUModelRunner(
         self.calculate_reorder_batch_threshold()
 
         # Initialize drafter attention backend
-        if self.speculative_config and (
+        if self.speculative_config and self._is_drafter_rank() and (
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
         ):
@@ -7218,7 +7263,7 @@ class GPUModelRunner(
         )
 
         # Initialize drafter's cudagraph dispatcher if using spec decode.
-        if self.speculative_config and (
+        if self.speculative_config and self._is_drafter_rank() and (
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
             or self.speculative_config.uses_extract_hidden_states()
@@ -7460,9 +7505,8 @@ class GPUModelRunner(
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
 
-        if (
-            self.speculative_config
-            and self.speculative_config.uses_extract_hidden_states()
+        if self.speculative_config and self._is_drafter_rank() and (
+            self.speculative_config.uses_extract_hidden_states()
         ):
             assert isinstance(self.drafter, ExtractHiddenStatesProposer)
             # validate all draft model layers belong to the same kv cache

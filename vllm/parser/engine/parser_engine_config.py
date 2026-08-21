@@ -78,6 +78,9 @@ class ParserEngineConfig:
 
     stream_arg_deltas: bool = True
 
+    # Repeat the resolved function name on argument-only streaming deltas.
+    repeat_tool_name_in_deltas: bool = False
+
     tool_args_json: bool = True
 
     arg_structural_chars: frozenset[str] | None = None

@@ -21,7 +21,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.interfaces import LocalArgmaxMixin
+from vllm.model_executor.models.interfaces import LocalArgmaxMixin, SupportsPP
 from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5DecoderLayer,
     Qwen3_5Model,
@@ -159,7 +159,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
@@ -268,6 +268,9 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
             self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -301,15 +304,23 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
+        if input_ids is None and inputs_embeds is None:
+            raise ValueError("Qwen3.5 MTP requires input_ids or inputs_embeds")
+        spec_step_idx = int(kwargs.get("spec_step_idx", 0))
         hidden_states = self.model(
-            input_ids, positions, hidden_states, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            hidden_states,
+            intermediate_tensors,
+            inputs_embeds,
+            spec_step_idx,
         )
         return hidden_states
 

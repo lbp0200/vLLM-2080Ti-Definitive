@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
+import importlib.util
 import os
+from pathlib import Path
+from types import ModuleType
 from typing import Literal
 
 import torch
@@ -90,6 +93,45 @@ logger = init_logger(__name__)
 
 MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
+_flashqla_legacy_module: ModuleType | None = None
+
+
+def _flashqla_legacy_forward():
+    """Load the SM75 extension without importing FlashQLA's TileLang package."""
+    global _flashqla_legacy_module
+    if _flashqla_legacy_module is None:
+        root = os.environ.get("FLASHQLA_ROOT")
+        if not root:
+            raise ImportError("FLASHQLA_ROOT is required for the SM75 legacy backend")
+        source = (
+            Path(root)
+            / "flash_qla"
+            / "ops"
+            / "gated_delta_rule"
+            / "legacy"
+            / "sm_legacy.py"
+        )
+        if not source.is_file():
+            raise ImportError(f"FlashQLA SM75 legacy source not found: {source}")
+        spec = importlib.util.spec_from_file_location(
+            "vllm_flashqla_sm75_legacy", source
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Unable to load FlashQLA SM75 legacy source: {source}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _flashqla_legacy_module = module
+    return _flashqla_legacy_module.chunk_gated_delta_rule_fwd_legacy
+
+
+def _preload_flashqla_legacy_extension() -> None:
+    """Load the legacy CUDA extension before model warmup/cudagraph capture."""
+    _flashqla_legacy_forward()
+    assert _flashqla_legacy_module is not None
+    load_ext = getattr(_flashqla_legacy_module, "_load_ext", None)
+    if load_ext is None:
+        raise ImportError("FlashQLA SM75 legacy module has no _load_ext function")
+    load_ext()
 
 
 def _resolve_gdn_prefill_backend(
@@ -155,11 +197,11 @@ def _resolve_gdn_prefill_backend(
         (7, 0)
     ) or current_platform.is_device_capability((7, 5)):
         try:
-            from flash_qla.ops.gated_delta_rule.legacy import (
-                chunk_gated_delta_rule_fwd_legacy,
-            )
-
-            supports_flashqla_legacy = chunk_gated_delta_rule_fwd_legacy is not None
+            # The extension must be ready before CUDA graph warmup.  Loading it
+            # lazily from the first prefill can invoke PyTorch's extension loader
+            # while a graph is being captured.
+            _preload_flashqla_legacy_extension()
+            supports_flashqla_legacy = True
         except (ImportError, OSError, RuntimeError, ValueError):
             # FlashQLA is an optional SM75 build dependency.  Keep the stock
             # Triton route usable when it is not present.
@@ -279,9 +321,7 @@ def flashqla_legacy_chunk_gated_delta_rule(
     use_qk_l2norm_in_kernel: bool = True,
 ):
     """Run the forward-only FlashQLA kernel used by SM70/SM75 builds."""
-    from flash_qla.ops.gated_delta_rule.legacy import (
-        chunk_gated_delta_rule_fwd_legacy,
-    )
+    chunk_gated_delta_rule_fwd_legacy = _flashqla_legacy_forward()
 
     if use_qk_l2norm_in_kernel:
         q = l2norm_fwd(q)

@@ -433,6 +433,137 @@ class TestTurboQuantWorkspaceReservation:
         ]
 
 
+class TestTurboQuantPrefixCombine:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("auto", "auto"),
+            ("", "auto"),
+            ("on", "on"),
+            ("TRUE", "on"),
+            ("1", "on"),
+            ("off", "off"),
+            ("disabled", "off"),
+            ("0", "off"),
+        ],
+    )
+    def test_normalize_prefix_combine_mode(self, value, expected):
+        from vllm.v1.attention.backends.turboquant_attn import (
+            _normalize_tq_prefix_combine_mode,
+        )
+
+        assert _normalize_tq_prefix_combine_mode(value) == expected
+
+    def test_normalize_prefix_combine_mode_rejects_unknown_value(self):
+        from vllm.v1.attention.backends.turboquant_attn import (
+            _normalize_tq_prefix_combine_mode,
+        )
+
+        with pytest.raises(ValueError, match="CONTINUATION_PREFIX_COMBINE"):
+            _normalize_tq_prefix_combine_mode("sometimes")
+
+    @pytest.mark.parametrize(
+        ("mode", "seq_len", "expected"),
+        [
+            ("off", 32768, False),
+            ("on", 1024, True),
+            ("auto", 20479, False),
+            ("auto", 20480, True),
+        ],
+    )
+    def test_prefix_combine_threshold(self, monkeypatch, mode, seq_len, expected):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        monkeypatch.setattr(
+            turboquant_attn, "_TQ_CONTINUATION_PREFIX_COMBINE_MODE", mode
+        )
+        monkeypatch.setattr(
+            turboquant_attn, "_TQ_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS", 20480
+        )
+
+        assert (
+            turboquant_attn._tq_continuation_prefix_combine_enabled(seq_len)
+            is expected
+        )
+
+    @pytest.mark.parametrize(
+        ("sliding_window", "expected_plan_names"),
+        [
+            (
+                None,
+                [
+                    "continuation_prefix_combine_prefix",
+                    "continuation_prefix_combine_current",
+                ],
+            ),
+            (4096, ["continuation"]),
+        ],
+    )
+    def test_plans_prefix_and_current_outside_forward(
+        self, monkeypatch, sliding_window, expected_plan_names
+    ):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        calls = []
+
+        def fake_plan(device, plan_key, plan_kwargs):
+            calls.append((plan_key, plan_kwargs))
+            return plan_key[0]
+
+        monkeypatch.setattr(
+            turboquant_attn,
+            "_get_or_plan_tq_flashinfer_prefill_wrapper",
+            fake_plan,
+        )
+        monkeypatch.setattr(
+            turboquant_attn, "_TQ_CONTINUATION_PREFIX_COMBINE_MODE", "auto"
+        )
+        monkeypatch.setattr(
+            turboquant_attn, "_TQ_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS", 20480
+        )
+
+        builder = object.__new__(turboquant_attn.TurboQuantMetadataBuilder)
+        builder._flashinfer_prefill_enabled = True
+        builder._device = torch.device("cpu")
+        builder._flashinfer_num_qo_heads = 8
+        builder._flashinfer_num_kv_heads = 4
+        builder._flashinfer_head_dim = 128
+        builder._flashinfer_dtype = torch.float16
+        builder._flashinfer_scale = 128**-0.5
+        builder.kv_cache_spec = SimpleNamespace(sliding_window=sliding_window)
+        cam = SimpleNamespace(
+            max_query_len=256,
+            max_seq_len=32768,
+            query_start_loc_cpu=torch.tensor([0, 256], dtype=torch.int32),
+            seq_lens_cpu_upper_bound=torch.tensor([32768], dtype=torch.int32),
+        )
+
+        first_chunk, continuation, prefix_combine = (
+            builder._plan_flashinfer_prefill_wrappers(cam, num_decodes=0)
+        )
+
+        assert first_chunk is None
+        assert [call[0][0] for call in calls] == expected_plan_names
+        if sliding_window is None:
+            assert continuation is None
+            assert prefix_combine == {
+                0: (
+                    "continuation_prefix_combine_prefix",
+                    "continuation_prefix_combine_current",
+                )
+            }
+            prefix_kwargs = calls[0][1]
+            current_kwargs = calls[1][1]
+            assert prefix_kwargs["causal"] is False
+            assert prefix_kwargs["kv_indptr"].tolist() == [0, 32512]
+            assert prefix_kwargs["max_sequence_kv"] == 32512
+            assert current_kwargs["causal"] is True
+            assert current_kwargs["kv_indptr"].tolist() == [0, 256]
+            assert current_kwargs["max_sequence_kv"] == 256
+        else:
+            assert continuation == {0: "continuation"}
+            assert prefix_combine is None
+
 # ============================================================================
 # Centroids tests (CPU-only)
 # ============================================================================

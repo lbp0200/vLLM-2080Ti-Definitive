@@ -54,7 +54,6 @@ from vllm.v1.attention.backends.fa_utils import (
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-
 # FlyDSL TurboQuant decode (AMD gfx950). Auto-selected when FlyDSL is available
 # for eligible layers (SoA store + FlyDSL decode + SoA-aware continuation);
 # non-gfx950 or ineligible layers use the SoA Triton decode.
@@ -63,6 +62,7 @@ from vllm.v1.attention.ops.flydsl_turboquant_decode import (
     is_flydsl_available,
     is_flydsl_gqa6_available,
 )
+from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.ops.triton_turboquant_decode import (
     _tq_full_dequant_kv,
     _fp8_format_code,
@@ -111,6 +111,41 @@ _TQ_CUDAGRAPH_SPEC_DECODE_SAFE = (
 _TQ_CUDAGRAPH_SPEC_PREFIX_ROWS = (
     os.getenv("VLLM_TURBOQUANT_CUDAGRAPH_SPEC_PREFIX_ROWS", "0") == "1"
 )
+
+
+def _normalize_tq_prefix_combine_mode(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in ("1", "true", "yes", "on", "force", "always"):
+        return "on"
+    if normalized in ("0", "false", "no", "off", "disable", "disabled"):
+        return "off"
+    if normalized in ("", "auto"):
+        return "auto"
+    raise ValueError(
+        "VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE must be one of "
+        "off, on, auto, 0, or 1"
+    )
+
+
+_TQ_CONTINUATION_PREFIX_COMBINE_MODE = _normalize_tq_prefix_combine_mode(
+    os.getenv("VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE", "auto")
+)
+_TQ_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS = max(
+    0,
+    int(
+        os.getenv(
+            "VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS", "20480"
+        )
+    ),
+)
+
+
+def _tq_continuation_prefix_combine_enabled(seq_len: int) -> bool:
+    if _TQ_CONTINUATION_PREFIX_COMBINE_MODE == "on":
+        return True
+    if _TQ_CONTINUATION_PREFIX_COMBINE_MODE == "auto":
+        return seq_len >= _TQ_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS
+    return False
 
 
 def _normalize_turboquant_flashinfer_backend(value: str) -> str:
@@ -353,6 +388,7 @@ class TurboQuantMetadata(AttentionMetadata):
     # the compiled model or its CUDA graph capture.
     flashinfer_first_chunk_wrapper: Any | None = None
     flashinfer_continuation_wrappers: dict[int, Any] | None = None
+    flashinfer_prefix_combine_wrappers: dict[int, tuple[Any, Any]] | None = None
 
 
 class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
@@ -392,7 +428,11 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         self,
         cam: CommonAttentionMetadata,
         num_decodes: int,
-    ) -> tuple[Any | None, dict[int, Any] | None]:
+    ) -> tuple[
+        Any | None,
+        dict[int, Any] | None,
+        dict[int, tuple[Any, Any]] | None,
+    ]:
         """Prepare raw-K/V FlashInfer wrappers before model forward."""
         if (
             not self._flashinfer_prefill_enabled
@@ -400,7 +440,7 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             or cam.query_start_loc_cpu is None
             or cam.seq_lens_cpu_upper_bound is None
         ):
-            return None, None
+            return None, None, None
 
         qsl = cam.query_start_loc_cpu
         seq_lens = cam.seq_lens_cpu_upper_bound
@@ -446,11 +486,15 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
                     "max_sequence_kv": cam.max_seq_len,
                 },
             )
-            return wrapper, None
+            return wrapper, None, None
 
         # Continuation K/V is dequantized per request in forward, but its
         # shapes are known to the scheduler. Plan each eligible request here.
         wrappers: dict[int, Any] = {}
+        prefix_combine_wrappers: dict[int, tuple[Any, Any]] = {}
+        prefix_combine_supported = (
+            getattr(self.kv_cache_spec, "sliding_window", None) is None
+        )
         for request_idx in range(num_decodes, num_reqs):
             q_len = int(q_lens[request_idx])
             seq_len = int(seq_lens[request_idx])
@@ -460,7 +504,87 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
                 or q_len >= seq_len
             ):
                 continue
+            cached_len = seq_len - q_len
             qo_indptr = torch.tensor([0, q_len], dtype=torch.int32, pin_memory=True)
+            if prefix_combine_supported and _tq_continuation_prefix_combine_enabled(
+                seq_len
+            ):
+                prefix_kv_indptr = torch.tensor(
+                    [0, cached_len], dtype=torch.int32, pin_memory=True
+                )
+                prefix_wrapper = _get_or_plan_tq_flashinfer_prefill_wrapper(
+                    self._device,
+                    (
+                        "continuation_prefix_combine_prefix",
+                        Hq,
+                        Hk,
+                        D,
+                        window_left,
+                        str(dtype),
+                        q_len,
+                        cached_len,
+                    ),
+                    {
+                        "qo_indptr": qo_indptr,
+                        "kv_indptr": prefix_kv_indptr,
+                        "num_qo_heads": Hq,
+                        "num_kv_heads": Hk,
+                        "head_dim_qk": D,
+                        "causal": False,
+                        "window_left": window_left,
+                        "sm_scale": self._flashinfer_scale,
+                        "pos_encoding_mode": "NONE",
+                        "q_data_type": dtype,
+                        "kv_data_type": torch.float16,
+                        "seq_lens": torch.tensor([cached_len], dtype=torch.int32),
+                        "seq_lens_q": torch.tensor([q_len], dtype=torch.int32),
+                        "max_token_per_sequence": q_len,
+                        "max_sequence_kv": cached_len,
+                    },
+                )
+                current_kv_indptr = torch.tensor(
+                    [0, q_len], dtype=torch.int32, pin_memory=True
+                )
+                current_wrapper = _get_or_plan_tq_flashinfer_prefill_wrapper(
+                    self._device,
+                    (
+                        "continuation_prefix_combine_current",
+                        Hq,
+                        Hk,
+                        D,
+                        window_left,
+                        str(dtype),
+                        q_len,
+                    ),
+                    {
+                        "qo_indptr": qo_indptr,
+                        "kv_indptr": current_kv_indptr,
+                        "num_qo_heads": Hq,
+                        "num_kv_heads": Hk,
+                        "head_dim_qk": D,
+                        "causal": True,
+                        "window_left": window_left,
+                        "sm_scale": self._flashinfer_scale,
+                        "pos_encoding_mode": "NONE",
+                        "q_data_type": dtype,
+                        "kv_data_type": dtype,
+                        "seq_lens": torch.tensor([q_len], dtype=torch.int32),
+                        "seq_lens_q": torch.tensor([q_len], dtype=torch.int32),
+                        "max_token_per_sequence": q_len,
+                        "max_sequence_kv": q_len,
+                    },
+                )
+                if prefix_wrapper is not None and current_wrapper is not None:
+                    prefix_combine_wrappers[request_idx] = (
+                        prefix_wrapper,
+                        current_wrapper,
+                    )
+                    continue
+                if _TQ_REQUIRE_FLASHINFER_PREFILL:
+                    raise RuntimeError(
+                        "TurboQuant fast route could not plan FlashInfer "
+                        "continuation prefix-combine wrappers."
+                    )
             kv_indptr = torch.tensor([0, seq_len], dtype=torch.int32, pin_memory=True)
             plan_key = (
                 "continuation",
@@ -493,7 +617,7 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
                     "max_sequence_kv": seq_len,
                 },
             )
-        return None, wrappers or None
+        return None, wrappers or None, prefix_combine_wrappers or None
 
     def _reserve_workspace(self) -> None:
         if not is_workspace_manager_initialized():
@@ -566,7 +690,7 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             cam, decode_threshold=self.reorder_batch_threshold
         )
-        first_chunk_wrapper, continuation_wrappers = (
+        first_chunk_wrapper, continuation_wrappers, prefix_combine_wrappers = (
             self._plan_flashinfer_prefill_wrappers(cam, num_decodes)
         )
 
@@ -585,6 +709,7 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             seq_lens_cpu=cam.seq_lens_cpu_upper_bound,
             flashinfer_first_chunk_wrapper=first_chunk_wrapper,
             flashinfer_continuation_wrappers=continuation_wrappers,
+            flashinfer_prefix_combine_wrappers=prefix_combine_wrappers,
         )
 
 
@@ -1000,6 +1125,16 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     }
                     or None
                 ),
+                flashinfer_prefix_combine_wrappers=(
+                    {
+                        request_idx - num_decodes: wrappers
+                        for request_idx, wrappers in (
+                            attn_metadata.flashinfer_prefix_combine_wrappers or {}
+                        ).items()
+                        if request_idx >= num_decodes
+                    }
+                    or None
+                ),
             )
             k = key[:N].view(N, self.num_kv_heads, self.head_size)
             v = value[:N].view(N, self.num_kv_heads, self.head_size)
@@ -1354,9 +1489,17 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     if (
                         _TQ_REQUIRE_FLASHINFER_PREFILL
                         and (
-                            attn_metadata.flashinfer_continuation_wrappers is None
-                            or i
-                            not in attn_metadata.flashinfer_continuation_wrappers
+                            (
+                                attn_metadata.flashinfer_continuation_wrappers is None
+                                or i
+                                not in attn_metadata.flashinfer_continuation_wrappers
+                            )
+                            and (
+                                attn_metadata.flashinfer_prefix_combine_wrappers
+                                is None
+                                or i
+                                not in attn_metadata.flashinfer_prefix_combine_wrappers
+                            )
                         )
                     ):
                         raise RuntimeError(
@@ -1378,6 +1521,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         flashinfer_wrapper=(
                             attn_metadata.flashinfer_continuation_wrappers.get(i)
                             if attn_metadata.flashinfer_continuation_wrappers
+                            else None
+                        ),
+                        flashinfer_prefix_combine_wrappers=(
+                            attn_metadata.flashinfer_prefix_combine_wrappers.get(i)
+                            if attn_metadata.flashinfer_prefix_combine_wrappers
                             else None
                         ),
                     )
@@ -1525,6 +1673,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         Pi: torch.Tensor,
         centroids: torch.Tensor,
         flashinfer_wrapper: Any | None = None,
+        flashinfer_prefix_combine_wrappers: tuple[Any, Any] | None = None,
     ) -> torch.Tensor:
         """Handle continuation chunk by dequanting cached K/V from TQ cache.
 
@@ -1656,6 +1805,51 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         # Skip .contiguous() — the copy into k_full/v_full handles layout
         v_cached_trim = v_cached[0, :, :cached_len, :].transpose(0, 1)
+
+        if flashinfer_prefix_combine_wrappers is not None:
+            prefix_wrapper, current_wrapper = flashinfer_prefix_combine_wrappers
+            prefix_out = torch.empty_like(query)
+            prefix_lse = torch.empty(
+                (q_len, Hq), dtype=torch.float32, device=device
+            )
+            prefix_out, prefix_lse = prefix_wrapper.run(
+                query,
+                k_cached_trim,
+                v_cached_trim,
+                out=prefix_out,
+                lse=prefix_lse,
+                return_lse=True,
+            )
+            current_out = torch.empty_like(query)
+            current_lse = torch.empty(
+                (q_len, Hq), dtype=torch.float32, device=device
+            )
+            current_out, current_lse = current_wrapper.run(
+                query,
+                key_chunk,
+                val_chunk,
+                out=current_out,
+                lse=current_lse,
+                return_lse=True,
+            )
+            merged_out = torch.empty_like(query)
+            merge_attn_states(
+                merged_out,
+                prefix_out,
+                prefix_lse.transpose(0, 1).contiguous(),
+                current_out,
+                current_lse.transpose(0, 1).contiguous(),
+            )
+            logger.info_once(
+                "TurboQuant continuation prefix-combine path used: "
+                "mode=%s min_tokens=%s seq_len=%s cached_len=%s q_len=%s",
+                _TQ_CONTINUATION_PREFIX_COMBINE_MODE,
+                _TQ_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS,
+                seq_len,
+                cached_len,
+                q_len,
+            )
+            return merged_out
 
         # Concatenate cached + current chunk K/V (match query dtype)
         # Pre-allocate full K/V buffer, copy into slices (no cat alloc)

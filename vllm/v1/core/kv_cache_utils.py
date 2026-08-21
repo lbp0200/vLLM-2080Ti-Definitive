@@ -2588,6 +2588,37 @@ def _project_kv_cache_groups_to_worker(
     return projected_groups
 
 
+_TQ_CONTINUATION_DECODE_THRESHOLD = 128
+
+
+def _turboquant_prefill_workspace_reserve_bytes(vllm_config: VllmConfig) -> int:
+    """Reserve the TurboQuant continuation-prefill dequant workspace."""
+    if not envs.VLLM_TQ_RESERVE_PREFILL_WORKSPACE:
+        return 0
+    cache_config = vllm_config.cache_config
+    cache_dtype = getattr(cache_config, "cache_dtype", None)
+    if not (isinstance(cache_dtype, str) and cache_dtype.startswith("turboquant_")):
+        return 0
+    scheduler_config = vllm_config.scheduler_config
+    if not (
+        scheduler_config.enable_chunked_prefill
+        and scheduler_config.max_num_batched_tokens
+        > _TQ_CONTINUATION_DECODE_THRESHOLD
+    ):
+        return 0
+
+    model_config = vllm_config.model_config
+    parallel_config = vllm_config.parallel_config
+    num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+    head_size = model_config.get_head_size()
+    max_cached_len = max(0, model_config.max_model_len - 1)
+    block_size = int(cache_config.block_size)
+    alloc_len = round_up(max_cached_len, block_size)
+    buf_bytes = round_up(num_kv_heads * alloc_len * head_size * 2, 256)
+    num_ubatches = 2 if getattr(parallel_config, "enable_dbo", False) else 1
+    return 2 * buf_bytes * num_ubatches
+
+
 def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
@@ -2667,6 +2698,20 @@ def get_kv_cache_configs(
         _project_kv_cache_groups_to_worker(global_kv_cache_groups, worker_spec)
         for worker_spec in kv_cache_specs
     ]
+
+    workspace_reserve = _turboquant_prefill_workspace_reserve_bytes(vllm_config)
+    if workspace_reserve > 0:
+        available_memory = [
+            avail_mem if not groups else max(0, avail_mem - workspace_reserve)
+            for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
+        ]
+        logger.info(
+            "Reserving %s GiB per rank for the turboquant continuation-prefill "
+            "workspace before sizing the KV cache "
+            "(VLLM_TQ_RESERVE_PREFILL_WORKSPACE=1); set it to 0 to restore the "
+            "legacy sizing.",
+            format_gib(workspace_reserve),
+        )
 
     # If `num_gpu_blocks_override` is set, the cache size that will actually
     # be allocated is decoupled from the profiled `available_memory`:

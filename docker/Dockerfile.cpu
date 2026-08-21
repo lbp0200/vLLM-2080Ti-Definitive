@@ -464,8 +464,6 @@ ADD ./examples/ ./examples/
 ADD ./benchmarks/ ./benchmarks/
 ADD ./vllm/collect_env.py .
 ADD ./docker/ ./docker/
-ADD ./.buildkite/ ./.buildkite/
-
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -e tests/vllm_test_utils

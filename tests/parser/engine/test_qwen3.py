@@ -296,6 +296,31 @@ class TestStreaming:
         parsed = json.loads(args_text)
         assert parsed == {"city": "Tokyo"}
 
+    def test_streaming_tool_name_is_present_on_every_delta(self, parser, mock_request):
+        """OpenAI clients require a string function name on each tool delta."""
+        chunks = [
+            "<tool_call>\n",
+            "<function=get_weather>\n",
+            "<parameter=city>Tokyo",
+            "</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        tool_deltas = [
+            delta
+            for delta, _ in results
+            if delta is not None and delta.tool_calls
+        ]
+        assert tool_deltas
+        assert all(
+            tc.function is not None and tc.function.name
+            for delta in tool_deltas
+            for tc in delta.tool_calls
+        )
+
     def test_streaming_multi_param(self, parser, mock_request):
         chunks = [
             "<tool_call>\n",

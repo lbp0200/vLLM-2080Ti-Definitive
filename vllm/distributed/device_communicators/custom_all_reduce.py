@@ -32,6 +32,10 @@ except ImportError:
 
 logger = init_logger(__name__)
 
+# Profiling uses temporary CUDA graphs and must not create custom-all-reduce
+# IPC handles, which can leak across repeated graph-capture attempts.
+_PROFILING_CAR_DISABLED = False
+
 
 def _has_local_multicast_support(device: torch.device) -> bool:
     """Return whether this CUDA device can allocate multicast memory."""
