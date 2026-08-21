@@ -68,6 +68,30 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
+def test_dflash2_draft_forces_v2_model_runner():
+    """DFlash2 must use the V2 speculator that runs its candidate selector."""
+
+    def config(method, architectures):
+        return SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                method=method,
+                draft_model_config=SimpleNamespace(architectures=architectures),
+            )
+        )
+
+    assert VllmConfig._is_dflash2_draft(config("dflash", ["DFlash2DraftModel"]))
+    assert not VllmConfig._is_dflash2_draft(config("dflash", ["DFlashDraftModel"]))
+    assert not VllmConfig._is_dflash2_draft(config("eagle", ["DFlash2DraftModel"]))
+    assert not VllmConfig._is_dflash2_draft(SimpleNamespace(speculative_config=None))
+    assert not VllmConfig._is_dflash2_draft(
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                method="dflash", draft_model_config=None
+            )
+        )
+    )
+
+
 @pytest.mark.parametrize(
     ("use_v2_model_runner", "expected_capture_sizes"),
     [
