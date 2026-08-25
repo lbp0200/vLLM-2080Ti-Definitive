@@ -2,6 +2,23 @@
 
 This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately from upstream vLLM releases.
 
+## v0.2.1-pre3 - 2026-08-25
+
+`v0.2.1-pre3` is a local integration candidate for the CUDA 13 based 0.2.x line. The maintained 0.1.x line remains the project's primary stable release line; 0.2.x is still intended for target-host validation.
+
+### Changes Since v0.2.1-pre2
+
+- Ports the validated named-tool truncation contract from 0.1.x: incomplete tool arguments preserve `finish_reason=length` in both streaming and non-streaming chat responses.
+- Aligns Qwen3 XML streaming with the one-name-per-tool-call contract while retaining the parser-engine implementation used by 0.2.x.
+- Bounds the TurboQuant FlashInfer prefill wrapper plan cache with LRU eviction and keeps eviction disabled for CUDA Graph-safe wrappers to avoid dangling captured-buffer references.
+- Re-aligns Mamba offload hit boundaries after per-group chunk clamps so hybrid recurrent state cannot extend beyond the reported attention prefix.
+- Retains the existing 0.2.x `max_model_len`-aware TurboQuant continuation workspace reservation, which is already the current-architecture equivalent of the 0.1.x #134 fix.
+
+### Local Validation
+
+- `py_compile`, shell syntax checks, and `git diff --check` pass for the changed runtime, parser, offload scheduler, and regression tests.
+- Target-GPU CUDA 13 / SM75 serving and throughput validation remains required before publishing this candidate as a public prerelease.
+
 ## v0.2.1-pre2 - 2026-08-21
 
 `v0.2.1-pre2` is the second public preview of the CUDA 13 based 0.2.x line. The maintained 0.1.x line remains the project's primary stable release line; 0.2.x is intended for testing the newer upstream runtime and must not yet be treated as a replacement.

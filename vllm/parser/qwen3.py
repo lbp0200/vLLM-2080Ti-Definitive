@@ -196,7 +196,10 @@ def qwen3_config(
         },
         arg_converter=_qwen3_arg_converter,
         stream_arg_deltas=True,
-        repeat_tool_name_in_deltas=True,
+        # Emit the function name on the first delta only. Repeating it on
+        # every argument fragment is not required by the OpenAI stream format
+        # and was the source of duplicate Qwen XML tool names.
+        repeat_tool_name_in_deltas=False,
         strip_trailing_reasoning_whitespace=False,
         tool_args_json=False,
     )

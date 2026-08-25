@@ -742,6 +742,18 @@ class OffloadingConnectorScheduler:
                 req_status.req_context,
             )
 
+    def _align_hit_boundary(self, num_tokens: int) -> int:
+        """Round a hit boundary down to the Mamba alignment when required.
+
+        A per-group chunk limit can produce a tighter boundary that is no
+        longer aligned, even when the initial request limit was aligned. That
+        would report an attention prefix while restoring a recurrent state
+        from beyond it.
+        """
+        if self._mamba_align_size is None:
+            return num_tokens
+        return round_down(num_tokens, self._mamba_align_size)
+
     def _lookup_complete_chunks(
         self,
         req_status: RequestOffloadState,
@@ -766,11 +778,8 @@ class OffloadingConnectorScheduler:
             # for sliding window attention, we must reduce by 1 to make sure
             # we still have a hit after reduction
             max_hit_size_tokens -= 1
-            if self._mamba_align_size is not None:
-                # Constrain hit-window to the mamba block size.
-                max_hit_size_tokens = round_down(
-                    max_hit_size_tokens, self._mamba_align_size
-                )
+            # Constrain the initial hit window to the Mamba block size.
+            max_hit_size_tokens = self._align_hit_boundary(max_hit_size_tokens)
 
         num_hit_tokens: int = 0
         defer_lookup = False
@@ -801,8 +810,11 @@ class OffloadingConnectorScheduler:
                 )
 
                 # Constrain to a chunk-aligned boundary for this group.
-                max_hit_size_tokens = min(
-                    max_hit_size_tokens, len(offload_keys) * tokens_per_chunk
+                max_hit_size_tokens = self._align_hit_boundary(
+                    min(
+                        max_hit_size_tokens,
+                        len(offload_keys) * tokens_per_chunk,
+                    )
                 )
                 if max_hit_size_tokens - num_computed_tokens < tokens_per_chunk:
                     # We can only load less than a chunk, so skip.
@@ -868,9 +880,11 @@ class OffloadingConnectorScheduler:
                         num_hit_chunks -= 1
                         eagle_verified.add(group_idx)
 
-                    max_hit_size_tokens = min(
-                        max_hit_size_tokens,
-                        tokens_per_chunk * (start_chunk_idx + num_hit_chunks),
+                    max_hit_size_tokens = self._align_hit_boundary(
+                        min(
+                            max_hit_size_tokens,
+                            tokens_per_chunk * (start_chunk_idx + num_hit_chunks),
+                        )
                     )
 
                 new_num_hit_tokens = max_hit_size_tokens - num_computed_tokens

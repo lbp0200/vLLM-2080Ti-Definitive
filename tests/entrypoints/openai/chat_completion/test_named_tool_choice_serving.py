@@ -116,6 +116,20 @@ async def _full(text: str):
     )
 
 
+async def _full_with_finish(text: str, finish_reason: str):
+    request = _request(False)
+    return await _serving().chat_completion_full_generator(
+        request,
+        _results([(text, finish_reason)]),
+        "named-full",
+        "test-model",
+        request.messages,
+        object(),
+        RequestResponseMetadata(request_id="named-full"),
+        _PlainContentParser(),
+    )
+
+
 async def _stream(texts: list[tuple[str, str | None]]):
     request = _request(True)
     chunks = []
@@ -162,6 +176,18 @@ def test_named_tool_choice_stream_wraps_plain_content():
     }
     assert tool_deltas[1]["function"]["arguments"] == '"city": "Shanghai"}'
     assert choices[-1]["finish_reason"] == "tool_calls"
+
+
+def test_named_tool_choice_full_preserves_truncated_finish_reason():
+    response = asyncio.run(_full_with_finish('{"city":', "length"))
+    choice = response.choices[0]
+    assert choice.message.tool_calls
+    assert choice.finish_reason == "length"
+
+
+def test_named_tool_choice_stream_preserves_truncated_finish_reason():
+    choices = asyncio.run(_stream([('{"city":', "length")]))
+    assert choices[-1]["finish_reason"] == "length"
 
 
 def test_named_tool_choice_empty_output_does_not_create_tool_call():

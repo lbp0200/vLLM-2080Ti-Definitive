@@ -434,6 +434,49 @@ class TestTurboQuantWorkspaceReservation:
 
 
 class TestTurboQuantPrefixCombine:
+    def test_flashinfer_prefill_plan_cache_is_bounded_lru(self, monkeypatch):
+        from collections import OrderedDict
+
+        from vllm.v1.attention.backends import turboquant_attn
+
+        monkeypatch.setattr(
+            turboquant_attn,
+            "_TQ_FI_PREFILL_WRAPPERS",
+            OrderedDict((("old", object()), ("warm", object()))),
+        )
+        monkeypatch.setattr(turboquant_attn, "_TQ_FI_PREFILL_PLAN_CACHE_MAXSIZE", 2)
+        monkeypatch.setattr(turboquant_attn, "_TQ_FI_PREFILL_CUDAGRAPH_SAFE", False)
+
+        assert turboquant_attn._prepare_tq_flashinfer_prefill_wrapper_cache("old")
+        assert list(turboquant_attn._TQ_FI_PREFILL_WRAPPERS) == ["warm", "old"]
+
+        assert (
+            turboquant_attn._prepare_tq_flashinfer_prefill_wrapper_cache("new")
+            is None
+        )
+        assert list(turboquant_attn._TQ_FI_PREFILL_WRAPPERS) == ["old"]
+
+    def test_flashinfer_prefill_plan_cache_kept_for_cuda_graph_safe_wrappers(
+        self, monkeypatch
+    ):
+        from collections import OrderedDict
+
+        from vllm.v1.attention.backends import turboquant_attn
+
+        monkeypatch.setattr(
+            turboquant_attn,
+            "_TQ_FI_PREFILL_WRAPPERS",
+            OrderedDict((("old", object()),)),
+        )
+        monkeypatch.setattr(turboquant_attn, "_TQ_FI_PREFILL_PLAN_CACHE_MAXSIZE", 1)
+        monkeypatch.setattr(turboquant_attn, "_TQ_FI_PREFILL_CUDAGRAPH_SAFE", True)
+
+        assert (
+            turboquant_attn._prepare_tq_flashinfer_prefill_wrapper_cache("new")
+            is None
+        )
+        assert list(turboquant_attn._TQ_FI_PREFILL_WRAPPERS) == ["old"]
+
     @pytest.mark.parametrize(
         ("value", "expected"),
         [

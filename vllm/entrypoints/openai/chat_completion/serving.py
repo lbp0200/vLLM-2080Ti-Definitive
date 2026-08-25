@@ -793,7 +793,7 @@ class OpenAIServingChat(GenerateBaseServing):
                         # In OpenAI's API, when a tool is called, the
                         # finish_reason is:
                         # "tool_calls" whenever a tool call was emitted.
-                        if tools_streamed[i]:
+                        if tools_streamed[i] and output.finish_reason in (None, "stop"):
                             finish_reason_ = "tool_calls"
                         else:
                             finish_reason_ = (
@@ -1120,13 +1120,20 @@ class OpenAIServingChat(GenerateBaseServing):
 
             # In OpenAI's API, when a tool is called, the finish_reason is:
             # "tool_calls" whenever a tool call was emitted.
-            is_finish_reason_tool_calls = auto_tools_called or (
-                isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
-                and bool(message.tool_calls)
-            ) or (
-                request.tool_choice
-                and request.tool_choice == "required"
-                and output.finish_reason == "stop"
+            # Only surface "tool_calls" when generation completed normally.
+            # A truncated argument stream must preserve ``length`` so clients
+            # do not treat incomplete JSON as an executable tool call.
+            is_finish_reason_tool_calls = output.finish_reason in (None, "stop") and (
+                auto_tools_called
+                or (
+                    isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+                    and bool(message.tool_calls)
+                )
+                or (
+                    request.tool_choice
+                    and request.tool_choice == "required"
+                    and output.finish_reason == "stop"
+                )
             )
 
             routed_experts_b64 = (

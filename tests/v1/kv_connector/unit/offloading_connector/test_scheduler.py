@@ -2947,6 +2947,52 @@ class TestEagle:
     # Lookup unit tests: call _lookup() directly via request_runner
     # -------------------------------------------------------------------
 
+    def test_mamba_hit_boundary_is_realigned_after_group_clamp(self):
+        """A non-divisor chunk size must not expose an unaligned Mamba hit."""
+        mamba_chunks_looked_up: list[int] = []
+
+        class RecordingAllHitManager:
+            def lookup(self, key, req_context):
+                if isinstance(key, bytes) and key.startswith(b"m"):
+                    mamba_chunks_looked_up.append(int(key[1:]))
+                return LookupResult.HIT
+
+        scheduler = object.__new__(OffloadingConnectorScheduler)
+        scheduler._sliding_window_groups = (1,)
+        scheduler._lookup_groups = (0, 1)
+        scheduler._mamba_align_size = 16
+        scheduler._chunks_being_loaded = set()
+        scheduler.manager = RecordingAllHitManager()
+        scheduler.config = SimpleNamespace(
+            kv_group_configs=(
+                SimpleNamespace(
+                    tokens_per_chunk=12,
+                    sliding_window_size_in_chunks=None,
+                    is_eagle_group=False,
+                ),
+                SimpleNamespace(
+                    tokens_per_chunk=16,
+                    sliding_window_size_in_chunks=1,
+                    is_eagle_group=False,
+                ),
+            )
+        )
+        req_status = SimpleNamespace(
+            num_locally_computed_tokens=0,
+            req=SimpleNamespace(num_tokens=34, request_id="unit"),
+            req_context=None,
+            group_states=(
+                SimpleNamespace(offload_keys=[b"f0", b"f1"]),
+                SimpleNamespace(offload_keys=[b"m0", b"m1", b"m2"]),
+            ),
+        )
+
+        hit_tokens = scheduler._lookup(req_status)
+
+        assert hit_tokens == 16
+        assert mamba_chunks_looked_up
+        assert (max(mamba_chunks_looked_up) + 1) * 16 <= hit_tokens
+
     def test_full_attn_lookup_pops_one_block(self, request_runner):
         """Full-attn eagle group with 3 blocks all hit → pop to 2 blocks."""
         block_size = 4

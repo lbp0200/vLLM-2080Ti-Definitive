@@ -17,6 +17,7 @@ Per-head per-position slot layout:
 """
 
 import contextlib
+from collections import OrderedDict
 import functools
 import math
 import os
@@ -165,6 +166,15 @@ _TQ_REQUIRE_FLASHINFER_PREFILL = (
 _DEFAULT_TQ_FI_PLAN_CACHE = (
     os.getenv("VLLM_TURBOQUANT_FLASHINFER_PREFILL_PLAN_CACHE", "1") == "1"
 )
+_TQ_FI_PREFILL_PLAN_CACHE_MAXSIZE = max(
+    1,
+    int(
+        os.getenv(
+            "VLLM_TURBOQUANT_FLASHINFER_PREFILL_PLAN_CACHE_MAXSIZE",
+            "16",
+        )
+    ),
+)
 _TQ_FI_PREFILL_CUDAGRAPH_SAFE = (
     os.getenv("VLLM_TURBOQUANT_FLASHINFER_PREFILL_CUDAGRAPH_SAFE", "0") == "1"
 )
@@ -175,7 +185,7 @@ _SM75_TQ_FI_CONTINUATION_MIN_QUERY_LEN = int(
     os.getenv("VLLM_TURBOQUANT_SM75_FLASHINFER_CONTINUATION_MIN_QUERY_LEN", "1")
 )
 _TQ_FI_PREFILL_WORKSPACES: dict[tuple[str, str], torch.Tensor] = {}
-_TQ_FI_PREFILL_WRAPPERS: dict[tuple[Any, ...], Any] = {}
+_TQ_FI_PREFILL_WRAPPERS: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
 
 
 def _soa_imports():
@@ -194,6 +204,34 @@ def _soa_imports():
     )
 
     return soa_store, soa_dequant, soa_decode
+
+
+def _prepare_tq_flashinfer_prefill_wrapper_cache(cache_key: tuple[Any, ...]):
+    """Return a cached wrapper and make room for a new plan when needed.
+
+    CUDA-graph-safe wrappers own indptr buffers referenced by captured graphs;
+    without a graph-destruction callback they must remain live for the process
+    lifetime. The ordinary path can evict the least-recently-used wrapper so
+    long-context plan keys do not consume unbounded GPU workspace.
+    """
+    wrapper = _TQ_FI_PREFILL_WRAPPERS.get(cache_key)
+    if wrapper is not None:
+        _TQ_FI_PREFILL_WRAPPERS.move_to_end(cache_key)
+        return wrapper
+
+    if _TQ_FI_PREFILL_CUDAGRAPH_SAFE:
+        logger.warning_once(
+            "TurboQuant FlashInfer prefill plan cache eviction is disabled "
+            "when CUDA-graph-safe wrappers are enabled; set "
+            "VLLM_TURBOQUANT_FLASHINFER_PREFILL_CUDAGRAPH_SAFE=0 to allow "
+            "bounded wrapper caching"
+        )
+    elif len(_TQ_FI_PREFILL_WRAPPERS) >= _TQ_FI_PREFILL_PLAN_CACHE_MAXSIZE:
+        # Evict before constructing/planning the replacement. Each wrapper owns
+        # an auxiliary GPU workspace, so eviction after planning briefly needs
+        # maxsize + 1 workspaces and can defeat the OOM protection.
+        _TQ_FI_PREFILL_WRAPPERS.popitem(last=False)
+    return None
 
 
 def _build_hadamard(d: int, device_str: str) -> torch.Tensor:
@@ -261,7 +299,7 @@ def _get_or_plan_tq_flashinfer_prefill_wrapper(
 
     norm_device = _normalize_cuda_device(device)
     cache_key = (str(norm_device), _DEFAULT_TQ_FI_BACKEND, *plan_key)
-    wrapper = _TQ_FI_PREFILL_WRAPPERS.get(cache_key)
+    wrapper = _prepare_tq_flashinfer_prefill_wrapper_cache(cache_key)
     if wrapper is None:
         workspace = _get_shared_flashinfer_prefill_workspace(
             norm_device, _DEFAULT_TQ_FI_BACKEND

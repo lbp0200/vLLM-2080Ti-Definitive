@@ -296,8 +296,10 @@ class TestStreaming:
         parsed = json.loads(args_text)
         assert parsed == {"city": "Tokyo"}
 
-    def test_streaming_tool_name_is_present_on_every_delta(self, parser, mock_request):
-        """OpenAI clients require a string function name on each tool delta."""
+    def test_streaming_tool_name_is_present_only_on_first_delta(
+        self, parser, mock_request
+    ):
+        """Qwen XML streams the function name once, then only arguments."""
         chunks = [
             "<tool_call>\n",
             "<function=get_weather>\n",
@@ -315,11 +317,14 @@ class TestStreaming:
             if delta is not None and delta.tool_calls
         ]
         assert tool_deltas
-        assert all(
-            tc.function is not None and tc.function.name
+        names = [
+            tc.function.name
             for delta in tool_deltas
             for tc in delta.tool_calls
-        )
+            if tc.function is not None
+        ]
+        assert names[0] == "get_weather"
+        assert all(name is None for name in names[1:])
 
     def test_streaming_multi_param(self, parser, mock_request):
         chunks = [

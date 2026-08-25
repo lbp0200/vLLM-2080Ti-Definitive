@@ -14,12 +14,12 @@ Language: English | [Simplified Chinese](README.zh-CN.md)
 
 ![Live single-request throughput demo](docs/assets/vllmspeed.gif)
 
-Fork release: `0.2.1-pre2`
+Fork release: `0.2.1-pre3`
 Base vLLM: `0.27.1`
 
 Branch: [`vllm-2080ti-definitive-0.2.x`](https://github.com/weicj/vLLM-2080Ti-Definitive/tree/vllm-2080ti-definitive-0.2.x)
-Prerelease snapshot: [v0.2.1-pre2](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.1-pre2)
-Changes since pre1: [CHANGELOG.md](CHANGELOG.md)
+Prerelease snapshot: [v0.2.1-pre3](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.1-pre3)
+Changes since pre2: [CHANGELOG.md](CHANGELOG.md)
 
 ## Why RTX 2080 Ti For LLM Inference?
 
@@ -108,7 +108,7 @@ for graph modes, controlled comparisons, regression tests, and known limits.
 
 The FP8 35B routes are retained from the validated `v0.1.x` dual-2080-Ti
 profile set. They remain useful compatibility references, but require separate
-cu130 revalidation before being promoted as `0.2.1-pre2` deployment presets.
+cu130 revalidation before being promoted as `0.2.1-pre3` deployment presets.
 
 The retained set covers FP16-KV 256K text-only `normal` / `aggressive`,
 FP16-KV 136K text-and-image `normal` / `aggressive`, and a 178K `fast` MTP3
@@ -117,7 +117,7 @@ profile.
 ### Gemma4 Baseline Support
 
 Gemma4 has baseline model/runtime support in this tree. It is not part of the
-current `0.2.1-pre2` SM75 promotion set. Checkpoint forms, MTP requirements,
+current `0.2.1-pre3` SM75 promotion set. Checkpoint forms, MTP requirements,
 KV-cache limits, multimodal status, and the distinction between historical and
 cu130 evidence are documented in [Gemma4 SM75 support notes](docs/gemma4-sm75-support.md).
 
@@ -213,7 +213,7 @@ TurboQuant and MTP3. Historical profile capacities are not cu130 evidence.
 
 - Two RTX 2080 Ti 22 GB GPUs connected by NVLink
 - NVIDIA Turing / SM75, tensor parallel size 2
-- `0.2.1-pre2` target: CUDA 13.0, PyTorch 2.13, Python 3.12
+- `0.2.1-pre3` target: CUDA 13.0, PyTorch 2.13, Python 3.12
 - Target host: Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15
 
 Other Turing cards need independent validation for VRAM capacity, PCIe/NVLink
@@ -244,7 +244,7 @@ confirmed PCIe P2P and a separate profile validation.
 
 **Which CUDA and PyTorch versions apply?**
 
-The `0.2.1-pre2` target is CUDA 13.0 with PyTorch 2.13. The older CUDA 12.8 /
+The `0.2.1-pre3` target is CUDA 13.0 with PyTorch 2.13. The older CUDA 12.8 /
 PyTorch 2.11 stack remains a separate `v0.1.x` compatibility line. Keep the
 PyTorch CUDA build, toolkit, FlashInfer/FlashQLA build, and selected profile
 aligned; they are not interchangeable runtime combinations.
