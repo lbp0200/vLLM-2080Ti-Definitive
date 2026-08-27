@@ -270,6 +270,106 @@ def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
     assert req.request_id in output.num_scheduled_tokens
 
 
+def test_prefill_batch_barrier_realigns_staggered_equal_prompt_cohort():
+    """The final prefill step must emit first tokens for every peer together."""
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        max_num_batched_tokens=8192,
+        enable_chunked_prefill=True,
+        long_prefill_token_threshold=512,
+        prefill_batch_barrier=True,
+    )
+    requests = create_requests(
+        num_requests=4, num_tokens=1024, max_tokens=16, req_ids=["a", "b", "c", "d"]
+    )
+    scheduler.add_request(requests[0])
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"a": 512}
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["a"],
+            req_id_to_index={"a": 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    for request in requests[1:]:
+        scheduler.add_request(request)
+
+    # The late requests first catch up while the early request is held.
+    output = scheduler.schedule()
+    assert set(output.num_scheduled_tokens) == {"b", "c", "d"}
+    assert set(output.num_scheduled_tokens.values()) == {512}
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["b", "c", "d"],
+            req_id_to_index={"b": 0, "c": 1, "d": 2},
+            sampled_token_ids=[[], [], []],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    output = scheduler.schedule()
+    assert set(output.num_scheduled_tokens) == {"a", "b", "c", "d"}
+    assert set(output.num_scheduled_tokens.values()) == {512}
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id for request in requests],
+            req_id_to_index={
+                request.request_id: i for i, request in enumerate(requests)
+            },
+            sampled_token_ids=[[0] for _ in requests],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    assert all(not request.is_prefill_chunk for request in requests)
+
+
+def test_prefill_batch_barrier_ignores_blocked_waiting_request():
+    scheduler = create_scheduler(
+        max_num_seqs=2,
+        max_num_batched_tokens=1024,
+        max_model_len=2048,
+        enable_chunked_prefill=True,
+        long_prefill_token_threshold=512,
+        prefill_batch_barrier=True,
+    )
+    running, blocked = create_requests(
+        num_requests=2, num_tokens=1024, req_ids=["running", "blocked"]
+    )
+    scheduler.add_request(running)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"running": 512}
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["running"],
+            req_id_to_index={"running": 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    blocked.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+    scheduler.add_request(blocked)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"running": 512}
+    assert blocked in scheduler.skipped_waiting
+
+
 def test_cached_request_data_resumed_all_token_ids_mrv1_only():
     """all_token_ids carries a resumed request's token ids to the connector
     for the V1 model runner, but is skipped entirely for the V2 model runner.

@@ -53,10 +53,11 @@ Graph，把这些硬件资源转成可用的 serving 栈。
 
 服务形态：
 
-- 目标是双 2080 Ti 上的极限单并发：一个个人 agent 场景、一个严肃的 27B 或
-  35B 模型，以及这套硬件能稳定承载的最大实用上下文。
-- 这不是多租户 serving 集群。长 prefill 在调好参数后可以安全承载，但在 TP=2
-  runtime scheduler 中实际会被串行化。
+- 默认 profile 仍以个人 agent 的单请求时延和最大实用上下文为主。
+- pre3 另外加入同步长 prompt cohort 的可选吞吐路线。packed-varlen FlashQLA
+  与 shared prefill frontier 会让同批请求共同完成最后一次 prefill，再作为一个
+  真实 batch 进入 decode。这是有边界的本地并发能力，不代表双 2080 Ti 是通用
+  多租户 serving 集群。
 
 状态说明：已验证表示有对应证据；实验表示只有部分或历史证据；不支持表示已知
 存在缺失路径。
@@ -79,6 +80,13 @@ Qwen3.8 27B 是当前 SM75 验证主线。下表每一行均通过列出的项�
 | unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-only.env`、`fast` | 1411.91 / 102.60 |
 | unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/normal/nvfp4/fp8kv-240K-mtp3-text-image.env`、`normal` | 1266.09 / 55.69 |
 | unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-image.env`、`fast` | 1276.92 / 83.99 |
+
+pre3 真并发 profile 是
+`qwen3.8-27b/normal/nvfp4/fp8kv-16K-nomtp-concurrent.env`。在同一组物理双
+2080 Ti、TP=2、无 MTP、非 eager CUDA Graph、关闭 prefix cache、严格
+4096 输入/128 输出条件下，并发 `1 / 2 / 4 / 8` 的完整窗口 aggregate decode 为
+`41.53 / 79.94 / 151.19 / 269.30 tok/s`。完整窗口从第一个请求首 token 算到
+最后一个请求完成；C8 是 C1 的 6.48 倍，首 token spread 为 1.447 ms。
 
 FP8 和 Unsloth NVFP4 纯文本路线都通过 `PROFILE_OK` 质量探针，且实测请求严格输出
 128/128。官方 FP8 路线使用 Marlin weight-only FP8 与 FP16 KV 或 TurboQuant K8V4；

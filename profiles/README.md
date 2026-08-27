@@ -9,10 +9,10 @@ checkpoint path. Choose the model directory separately in `launcher.sh` or with
 
 The profiles below are carried forward from the maintained v0.1.x CUDA 12.8 /
 Torch 2.11 route for launcher compatibility. Their historical throughput
-figures are not v0.2.1-pre2 promotion evidence; current cu130 validation is
+figures are not v0.2.1-pre3 promotion evidence; current cu130 validation is
 recorded in `docs/2080ti-0.2.1-pre-validation.md`.
 
-This guide describes profile compatibility, not the `0.2.1-pre2` tested
+This guide describes profile compatibility, not the `0.2.1-pre3` tested
 checkpoint matrix. The intentionally limited current list is in the repository
 `README.md`: Qwen3.8 27B candidate checkpoints and the retained Qwen3.x 35B
 FP8 records. Gemma4 route detail is separate in `docs/gemma4-sm75-support.md`.
@@ -161,6 +161,16 @@ variants.
 |---|---:|---|---:|---|---:|---:|
 | `qwen3.8-27b/normal/nvfp4/fp8kv-240K-nomtp-text-only.env` | 240K | FP8 | 0 | PIECEWISE + FULL decode | 530,720 | 1421.10 / 38.89 |
 | `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-only.env` | 240K | TQK8V4 | 3 | PIECEWISE + FULL decode | 564,130 | 1411.91 / 102.60 |
+
+### Qwen3.8 27B NVFP4 true concurrency (formal 0.2.1-pre3 profile)
+
+`qwen3.8-27b/normal/nvfp4/fp8kv-16K-nomtp-concurrent.env` is the opt-in
+throughput route. It uses FP8 KV, no MTP, `MAX_BATCHED_TOKENS=8192`,
+`MAX_NUM_SEQS=8`, a 512-token long-prefill threshold, the shared prefill
+frontier, and disabled prefix caching. For exact 4K/128 requests, strict
+full-window aggregate decode at concurrency 1/2/4/8 is
+`41.53 / 79.94 / 151.19 / 269.30` tok/s. It is not a capacity profile and
+should not replace the 240K latency-oriented routes above.
 
 ### Qwen3.x 35B FP8 (legacy capacity baseline)
 

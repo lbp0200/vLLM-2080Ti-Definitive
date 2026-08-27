@@ -2,9 +2,9 @@
 
 This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately from upstream vLLM releases.
 
-## v0.2.1-pre3 - 2026-08-25
+## v0.2.1-pre3 - 2026-08-27
 
-`v0.2.1-pre3` is a local integration candidate for the CUDA 13 based 0.2.x line. The maintained 0.1.x line remains the project's primary stable release line; 0.2.x is still intended for target-host validation.
+`v0.2.1-pre3` is the validated true-concurrency candidate for the CUDA 13 based 0.2.x line. The maintained 0.1.x line remains the project's primary stable release line.
 
 ### Changes Since v0.2.1-pre2
 
@@ -13,11 +13,16 @@ This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately fro
 - Bounds the TurboQuant FlashInfer prefill wrapper plan cache with LRU eviction and keeps eviction disabled for CUDA Graph-safe wrappers to avoid dangling captured-buffer references.
 - Re-aligns Mamba offload hit boundaries after per-group chunk clamps so hybrid recurrent state cannot extend beyond the reported attention prefix.
 - Retains the existing 0.2.x `max_model_len`-aware TurboQuant continuation workspace reservation, which is already the current-architecture equivalent of the 0.1.x #134 fix.
+- Adds packed-varlen FlashQLA execution for SM70/SM75 Qwen GDN prefills, mapping concurrent sequences onto the CUDA grid batch axis instead of falling back to a serial or unsupported path.
+- Adds the opt-in `--prefill-batch-barrier` scheduler mode. Peer requests advance on a shared prefill frontier and submit their final prefill together, so the first generated token no longer escapes before the rest of the cohort enters decode.
+- Adds the validated `qwen3.8-27b/normal/nvfp4/fp8kv-16K-nomtp-concurrent.env` profile and fixes route-profile propagation of `DISABLE_PREFIX_CACHING`.
+- Evaluates all changes merged by stable `v0.1.17`: #125, #129, #132, and #133 are migrated in the current architecture; #128 and #130 are absorbed by the newer sampling/parser paths; #134 is already covered by the 0.2.x workspace reservation.
 
-### Local Validation
+### Validation
 
-- `py_compile`, shell syntax checks, and `git diff --check` pass for the changed runtime, parser, offload scheduler, and regression tests.
-- Target-GPU CUDA 13 / SM75 serving and throughput validation remains required before publishing this candidate as a public prerelease.
+- On the physical dual RTX 2080 Ti TP=2 target, Qwen3.8-27B-NVFP4 with no MTP, non-eager CUDA Graphs, FP8 KV, prefix caching disabled, and exact 4K/128 requests measured strict full-window aggregate decode of `41.53`, `79.94`, `151.19`, and `269.30` tok/s at concurrency 1/2/4/8. C8 is 6.48x C1 and its first-token spread is 1.447 ms.
+- The strict aggregate window is all completion tokens divided by the interval from the first request's first token to the last request's completion. At C8 it differs from the post-all-first-token tail metric by only 0.04%.
+- Packed-varlen FlashQLA matches the per-sequence CUDA reference exactly (`out_max_abs=0.0`, `state_max_abs=0.0`). Focused concurrency tests pass 3/3; the `v0.1.17` parser, serving, TurboQuant, and offload regression set passes 301 tests with 17 environment skips, and explicit repetition-detection coverage passes 19/19.
 
 ## v0.2.1-pre2 - 2026-08-21
 

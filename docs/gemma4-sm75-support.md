@@ -1,13 +1,13 @@
 # Gemma4 SM75 Support Notes
 
 This document contains the Gemma4 route detail deliberately kept out of the
-`0.2.1-pre2` README. The README's statement of baseline Gemma4 support means
+`0.2.1-pre3` README. The README's statement of baseline Gemma4 support means
 that this vLLM tree recognizes the relevant model/runtime paths. It does not
 mean that a Gemma4 checkpoint is a promoted dual-RTX-2080-Ti CUDA 13 route.
 
 ## Evidence Scope
 
-`0.2.1-pre2` is based on vLLM `v0.27.1`, CUDA 13.0, and PyTorch 2.13. No Gemma4
+`0.2.1-pre3` is based on vLLM `v0.27.1`, CUDA 13.0, and PyTorch 2.13. No Gemma4
 route has yet completed the release-level SM75 revalidation required for this
 branch. The experimental results below were obtained on the previous `v0.1.x`
 CUDA 12.8 / PyTorch 2.11 runtime. They are useful starting points, not cu130
@@ -25,12 +25,12 @@ model families. In this fork, use the checkpoint's `model_type` and processor
 metadata as authoritative; do not force a Gemma4 checkpoint through a generic
 draft-model route.
 
-| Model form | Intended use | SM75 `0.2.1-pre2` status |
+| Model form | Intended use | SM75 `0.2.1-pre3` status |
 | --- | --- | --- |
 | `Gemma4ForCausalLM` | Text-only Gemma4 checkpoints | Baseline runtime support; no promoted SM75 preset |
 | `Gemma4ForConditionalGeneration` | Tower-based text/image/video/audio variants | Baseline model support; no validated SM75 multimodal preset |
 | `Gemma4UnifiedForConditionalGeneration` | Encoder-free unified variants | Baseline model support; no validated SM75 multimodal preset |
-| Gemma4 assistant model types | MTP/speculative assistant checkpoints | Requires the Gemma4 MTP path; no `0.2.1-pre2` SM75 promotion evidence |
+| Gemma4 assistant model types | MTP/speculative assistant checkpoints | Requires the Gemma4 MTP path; no `0.2.1-pre3` SM75 promotion evidence |
 
 The upstream model registry and processor metadata remain the authority for
 model inventory and multimodal semantics. That upstream inventory is not a
@@ -40,9 +40,9 @@ hardware-specific validation table.
 
 These routes are intentionally marked experimental. They are the only Gemma4
 checkpoint records retained by the fork, but are not included in the
-`0.2.1-pre2` tested-checkpoint list.
+`0.2.1-pre3` tested-checkpoint list.
 
-| Target checkpoint | Weight route | Historical route state | `0.2.1-pre2` interpretation |
+| Target checkpoint | Weight route | Historical route state | `0.2.1-pre3` interpretation |
 | --- | --- | --- | --- |
 | [google/gemma-4-31B-it-qat-w4a16-ct](https://huggingface.co/google/gemma-4-31B-it-qat-w4a16-ct) with [google/gemma-4-31B-it-qat-q4_0-unquantized-assistant](https://huggingface.co/google/gemma-4-31B-it-qat-q4_0-unquantized-assistant) | QAT target plus matching assistant | Preferred historical experimental target for FP16/default-KV exploration and assistant MTP | Revalidate target-only startup/output first, then revalidate the paired MTP route |
 | [ebircak/gemma-4-31B-it-4bit-W4A16-GPTQ](https://huggingface.co/ebircak/gemma-4-31B-it-4bit-W4A16-GPTQ) | GPTQ-INT4 | Historical experimental route | Revalidate quantization loading, graph capture, output quality, and KV capacity before use |
@@ -90,7 +90,7 @@ legacy cu128 branch and this cu130 migration.
 
 Gemma4 multimodal model forms are recognized upstream, including image and
 other processor-mediated input paths. This fork has not validated an SM75
-`0.2.1-pre2` text-plus-image, video, or audio deployment preset. Multimodal
+`0.2.1-pre3` text-plus-image, video, or audio deployment preset. Multimodal
 requests also introduce encoder behavior that must be tested independently of
 text-only decoder CUDA Graph results.
 

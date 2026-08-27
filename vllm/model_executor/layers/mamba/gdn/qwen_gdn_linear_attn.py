@@ -124,6 +124,12 @@ def _flashqla_legacy_forward():
     return _flashqla_legacy_module.chunk_gated_delta_rule_fwd_legacy
 
 
+def _flashqla_legacy_varlen_forward():
+    _flashqla_legacy_forward()
+    assert _flashqla_legacy_module is not None
+    return _flashqla_legacy_module.chunk_gated_delta_rule_fwd_legacy_varlen
+
+
 def _preload_flashqla_legacy_extension() -> None:
     """Load the legacy CUDA extension before model warmup/cudagraph capture."""
     _flashqla_legacy_forward()
@@ -347,6 +353,46 @@ def flashqla_legacy_chunk_gated_delta_rule(
     return output, final_state
 
 
+def flashqla_legacy_varlen_chunk_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    output_final_state: bool,
+    cu_seqlens: torch.Tensor,
+    use_qk_l2norm_in_kernel: bool = True,
+):
+    """Run a packed varlen prefill as one FlashQLA CUDA batch."""
+    chunk_gated_delta_rule_fwd_legacy_varlen = (
+        _flashqla_legacy_varlen_forward()
+    )
+    if use_qk_l2norm_in_kernel:
+        q = l2norm_fwd(q)
+        k = l2norm_fwd(k)
+
+    output_dtype = v.dtype
+    state_dtype = initial_state.dtype
+    scale = q.shape[-1] ** -0.5
+    output, final_state = chunk_gated_delta_rule_fwd_legacy_varlen(
+        q.to(torch.float32).contiguous(),
+        k.to(torch.float32).contiguous(),
+        v.to(torch.float32).contiguous(),
+        g.to(torch.float32).contiguous(),
+        beta.to(torch.float32).contiguous(),
+        cu_seqlens.contiguous(),
+        scale,
+        initial_state.to(torch.float32).contiguous(),
+    )
+    output = output.to(output_dtype)
+    if output_final_state:
+        final_state = final_state.to(state_dtype)
+    else:
+        final_state = None
+    return output, final_state
+
+
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
@@ -449,9 +495,9 @@ class ChunkGatedDeltaRule(CustomOp):
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
     ):
-        # The legacy extension handles one contiguous sequence.  Preserve
-        # correctness for mixed/varlen scheduling by using the in-tree FLA
-        # implementation for all other metadata shapes.
+        # The legacy extension handles one dense batch or a packed varlen
+        # batch. The latter maps each request onto the CUDA grid's batch axis,
+        # so multiple recurrent scans run concurrently in one launch.
         if (
             q.ndim == 4
             and k.ndim == 4
@@ -473,6 +519,30 @@ class ChunkGatedDeltaRule(CustomOp):
                 out_flat = output.squeeze(0).reshape(-1)
                 core_flat = core_attn_out.reshape(-1)
                 core_flat[: out_flat.numel()].copy_(out_flat)
+            return output, final_state
+
+        if (
+            cu_seqlens is not None
+            and q.ndim == 4
+            and k.ndim == 4
+            and v.ndim == 4
+            and q.shape[0] == 1
+        ):
+            output, final_state = flashqla_legacy_varlen_chunk_gated_delta_rule(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                cu_seqlens=cu_seqlens,
+                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            )
+            if core_attn_out is not None:
+                core_attn_out.reshape(-1)[: output.numel()].copy_(
+                    output.reshape(-1)
+                )
             return output, final_state
 
         logger.warning_once(

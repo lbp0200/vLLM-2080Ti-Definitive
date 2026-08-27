@@ -56,12 +56,13 @@ The disposition of the previously merged SM75 PRs is recorded in [the 0.2.x PR m
 
 Serving shape:
 
-- The target is extreme single-concurrency serving: one personal-agent style
-  workload, one serious 27B or 35B model, and the largest practical context
-  window this hardware can sustain.
-- This is not a multi-tenant serving cluster. Long-prefill work is
-  capacity-safe when tuned, but is effectively serialized by the TP=2 runtime
-  scheduler.
+- The default profiles remain latency-oriented for one personal-agent style
+  workload and the largest practical context window this hardware can sustain.
+- Pre3 also adds an opt-in throughput route for synchronized long-prompt
+  cohorts. Packed-varlen FlashQLA and the shared prefill frontier keep peer
+  requests together through their final prefill step, then execute decode as
+  one real batch. This is bounded local concurrency, not a claim that dual
+  2080 Ti is a general multi-tenant serving cluster.
 
 Status: validated means evidence exists for the stated route; experimental
 means partial or historical evidence; unsupported means a known missing path.
@@ -85,6 +86,15 @@ with distinct prompts. Prefix-cache hits and failed quality probes are excluded.
 | unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-only.env`, `fast` | 1411.91 / 102.60 |
 | unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/normal/nvfp4/fp8kv-240K-mtp3-text-image.env`, `normal` | 1266.09 / 55.69 |
 | unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-image.env`, `fast` | 1276.92 / 83.99 |
+
+The pre3 true-concurrency profile is
+`qwen3.8-27b/normal/nvfp4/fp8kv-16K-nomtp-concurrent.env`. On the same physical
+dual-2080-Ti TP=2 pair, with no MTP, non-eager CUDA Graphs, prefix caching
+disabled, and exact 4096-input/128-output requests, strict full-window
+aggregate decode measured `41.53 / 79.94 / 151.19 / 269.30` tok/s at
+concurrency `1 / 2 / 4 / 8`. The metric covers the interval from the first
+request's first token until the last request completes; C8 is 6.48x C1 and its
+first-token spread is 1.447 ms.
 
 The FP8 and Unsloth NVFP4 pure-text routes passed the `PROFILE_OK` quality
 probe and produced exactly 128/128 output in the measured runs. The official

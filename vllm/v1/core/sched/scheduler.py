@@ -332,6 +332,16 @@ class Scheduler(SchedulerInterface):
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
+        additional_config = vllm_config.additional_config
+        self.prefill_batch_barrier = bool(
+            isinstance(additional_config, dict)
+            and additional_config.get("prefill_batch_barrier", False)
+        )
+        if self.prefill_batch_barrier:
+            logger.info_once(
+                "Prefill batch barrier enabled: peer prefills advance on a "
+                "shared frontier before entering decode."
+            )
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
@@ -596,6 +606,60 @@ class Scheduler(SchedulerInterface):
         prefill_scheduled = False
         # Whether any scheduled request has a synchronous connector KV load.
         has_sync_kv_loads = False
+        # Throughput-oriented mode: align the remaining prompt work of the
+        # requests that can participate in this batch. A final prefill step also
+        # samples the first output token, so blocking decode alone is too late:
+        # an earlier request would already have emitted a token. Advancing only
+        # the largest remaining-prompt frontier makes peers submit their final
+        # prefill together and then enter decode as one coherent batch.
+        prefill_frontier: int | None = None
+        prefill_frontier_step: int | None = None
+        if self.prefill_batch_barrier:
+            prefill_candidates = [
+                request
+                for request in self.running
+                if request.num_computed_tokens < request.num_prompt_tokens
+            ]
+            available_slots = max(
+                self.max_num_running_reqs
+                - len(self.running)
+                - self.num_waiting_for_streaming_input,
+                0,
+            )
+            if available_slots:
+                waiting_candidates = (
+                    request
+                    for request in self.waiting
+                    if request.num_computed_tokens < request.num_prompt_tokens
+                )
+                prefill_candidates.extend(
+                    itertools.islice(waiting_candidates, available_slots)
+                )
+
+            remaining_prompts = [
+                request.num_prompt_tokens - request.num_computed_tokens
+                for request in prefill_candidates
+            ]
+            if remaining_prompts:
+                prefill_frontier = max(remaining_prompts)
+                next_frontier = max(
+                    (r for r in remaining_prompts if r < prefill_frontier),
+                    default=0,
+                )
+                frontier_width = sum(
+                    r == prefill_frontier for r in remaining_prompts
+                )
+                prefill_frontier_step = min(
+                    prefill_frontier - next_frontier,
+                    max(token_budget // frontier_width, 1),
+                )
+                threshold = self.scheduler_config.long_prefill_token_threshold
+                if threshold > 0:
+                    prefill_frontier_step = min(
+                        prefill_frontier_step, threshold
+                    )
+
+        defer_decode_for_prefill_batch = prefill_frontier is not None
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -614,6 +678,21 @@ class Scheduler(SchedulerInterface):
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
+
+            if defer_decode_for_prefill_batch and not request.is_prefill_chunk:
+                req_index += 1
+                continue
+
+            request_prefill_remaining = max(
+                request.num_prompt_tokens - request.num_computed_tokens, 0
+            )
+            if (
+                prefill_frontier is not None
+                and request_prefill_remaining
+                and request_prefill_remaining < prefill_frontier
+            ):
+                req_index += 1
+                continue
 
             if (
                 request.num_output_placeholders > 0
@@ -661,6 +740,8 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+            if request_prefill_remaining and prefill_frontier_step is not None:
+                num_new_tokens = min(num_new_tokens, prefill_frontier_step)
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
             )
@@ -871,6 +952,18 @@ class Scheduler(SchedulerInterface):
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
+                request_prefill_remaining = max(
+                    request.num_prompt_tokens - request.num_computed_tokens, 0
+                )
+                if (
+                    prefill_frontier is not None
+                    and request_prefill_remaining
+                    and request_prefill_remaining < prefill_frontier
+                ):
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
+
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
                     request.status
@@ -1067,6 +1160,11 @@ class Scheduler(SchedulerInterface):
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
+                    if (
+                        num_computed_tokens < request.num_prompt_tokens
+                        and prefill_frontier_step is not None
+                    ):
+                        num_new_tokens = min(num_new_tokens, prefill_frontier_step)
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked

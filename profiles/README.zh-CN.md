@@ -7,10 +7,10 @@
 `MODEL_DIR=...` 单独选择。
 
 下面这些 profile 是从维护中的 v0.1.x CUDA 12.8 / Torch 2.11 路线保留的
-launcher 兼容模板。表中的历史吞吐数字不是 0.2.1-pre2 的 promotion 证据；
+launcher 兼容模板。表中的历史吞吐数字不是 0.2.1-pre3 的 promotion 证据；
 当前 cu130 验证结果见 `docs/2080ti-0.2.1-pre-validation.md`。
 
-本说明描述的是 profile 兼容性，而不是 `0.2.1-pre2` 的已测试 checkpoint 矩阵。
+本说明描述的是 profile 兼容性，而不是 `0.2.1-pre3` 的已测试 checkpoint 矩阵。
 当前刻意收窄后的清单位于仓库根目录 `README.md`：Qwen3.8 27B 候选 checkpoint
 以及保留的 Qwen3.x 35B FP8 记录。Gemma4 路线细节单列在
 `docs/gemma4-sm75-support.zh-CN.md`。
@@ -147,6 +147,15 @@ KV 显存：实测 GPU KV 为 426,080 tokens。fast NVFP4 实测 GPU KV 为 515,
 |---|---:|---|---:|---|---:|---:|
 | `qwen3.8-27b/normal/nvfp4/fp8kv-240K-nomtp-text-only.env` | 240K | FP8 | 0 | PIECEWISE + FULL decode | 530,720 | 1421.10 / 38.89 |
 | `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-only.env` | 240K | TQK8V4 | 3 | PIECEWISE + FULL decode | 564,130 | 1411.91 / 102.60 |
+
+### Qwen3.8 27B NVFP4 真并发（0.2.1-pre3 正式 profile）
+
+`qwen3.8-27b/normal/nvfp4/fp8kv-16K-nomtp-concurrent.env` 是可选吞吐路线。
+它使用 FP8 KV、无 MTP、`MAX_BATCHED_TOKENS=8192`、`MAX_NUM_SEQS=8`、
+512-token long-prefill threshold、shared prefill frontier，并关闭 prefix cache。
+严格 4K/128 下，并发 1/2/4/8 的完整窗口 aggregate decode 是
+`41.53 / 79.94 / 151.19 / 269.30 tok/s`。它不是容量 profile，不能替代上面的
+240K 时延导向路线。
 
 ### Qwen3.x 35B FP8（旧容量基线）
 

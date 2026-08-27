@@ -294,6 +294,9 @@ ROUTE_PROFILE_KEYS=(
   GPU_UTIL
   MAX_BATCHED_TOKENS
   MAX_NUM_SEQS
+  LONG_PREFILL_TOKEN_THRESHOLD
+  PREFILL_BATCH_BARRIER
+  DISABLE_PREFIX_CACHING
   MTP_K
   MESSAGE_TYPE
   MM_LIMIT_JSON
@@ -591,7 +594,6 @@ CHAT_TEMPLATE_FILE|CHAT_TEMPLATE_PRESET|TEMPLATE_DIR|REASONING_PARSER|\
 DEFAULT_CHAT_TEMPLATE_KWARGS|REASONING_MODE|REASONING_BUDGET|\
 ENABLE_AUTO_TOOL_CHOICE|TOOL_CALL_PARSER|TOOL_PARSER_PLUGIN|\
 ENABLE_PREFIX_CACHING|ENABLE_PROMPT_TOKENS_DETAILS|\
-DISABLE_PREFIX_CACHING|\
 VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH|VLLM_ENFORCE_STRICT_TOOL_CALLING)
       return 0
       ;;
@@ -703,6 +705,9 @@ save_manager_state() {
     printf 'GPU_UTIL=%q\n' "${GPU_UTIL:-}"
     printf 'MAX_BATCHED_TOKENS=%q\n' "${MAX_BATCHED_TOKENS:-}"
     printf 'MAX_NUM_SEQS=%q\n' "${MAX_NUM_SEQS:-}"
+    printf 'LONG_PREFILL_TOKEN_THRESHOLD=%q\n' "${LONG_PREFILL_TOKEN_THRESHOLD:-}"
+    printf 'PREFILL_BATCH_BARRIER=%q\n' "${PREFILL_BATCH_BARRIER:-0}"
+    printf 'DISABLE_PREFIX_CACHING=%q\n' "${DISABLE_PREFIX_CACHING:-0}"
     printf 'MTP_K=%q\n' "${MTP_K:-}"
     printf 'VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE=%q\n' "${VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE:-}"
     printf 'VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS=%q\n' "${VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS:-}"
@@ -2000,6 +2005,9 @@ save_current_profile_menu() {
   write_profile_entry "$target_file.tmp" GPU_UTIL "${GPU_UTIL:-}"
   write_profile_entry "$target_file.tmp" MAX_BATCHED_TOKENS "${MAX_BATCHED_TOKENS:-}"
   write_profile_entry "$target_file.tmp" MAX_NUM_SEQS "${MAX_NUM_SEQS:-}"
+  write_profile_entry "$target_file.tmp" LONG_PREFILL_TOKEN_THRESHOLD "${LONG_PREFILL_TOKEN_THRESHOLD:-}"
+  write_profile_entry "$target_file.tmp" PREFILL_BATCH_BARRIER "${PREFILL_BATCH_BARRIER:-0}"
+  write_profile_entry "$target_file.tmp" DISABLE_PREFIX_CACHING "${DISABLE_PREFIX_CACHING:-0}"
   write_profile_entry "$target_file.tmp" MTP_K "${MTP_K:-}"
   write_profile_entry "$target_file.tmp" VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE "${VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE:-}"
   write_profile_entry "$target_file.tmp" VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS "${VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS:-}"
@@ -3358,6 +3366,13 @@ build_args() {
     --max-num-batched-tokens "$MAX_BATCHED_TOKENS"
   )
 
+  if [[ -n "${LONG_PREFILL_TOKEN_THRESHOLD:-}" ]]; then
+    VLLM_ARGS+=(--long-prefill-token-threshold "$LONG_PREFILL_TOKEN_THRESHOLD")
+  fi
+  if [[ "${PREFILL_BATCH_BARRIER:-0}" == "1" ]]; then
+    VLLM_ARGS+=(--prefill-batch-barrier)
+  fi
+
   [[ -n "${QUANTIZATION:-}" ]] && VLLM_ARGS+=(--quantization "$QUANTIZATION")
   [[ -n "${KV_CACHE_DTYPE:-}" ]] && VLLM_ARGS+=(--kv-cache-dtype "$KV_CACHE_DTYPE")
   if [[ -n "${KV_CACHE_MEMORY_BYTES:-}" ]]; then
@@ -4119,6 +4134,7 @@ prepare_runtime_defaults() {
   GPU_UTIL=${GPU_UTIL:-$(default_gpu_util)}
   MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-2048}
   MAX_NUM_SEQS=${MAX_NUM_SEQS:-1}
+  PREFILL_BATCH_BARRIER=${PREFILL_BATCH_BARRIER:-0}
   MTP_K=${MTP_K:-0}
   PORT=${PORT:-8000}
   MODE=${MODE:-normal}
@@ -4182,6 +4198,8 @@ Launch summary:
   GPU util:             $gpu_util_label
   Max batched tokens:   $MAX_BATCHED_TOKENS
   Max sequences:        $MAX_NUM_SEQS
+  Prefill threshold:    ${LONG_PREFILL_TOKEN_THRESHOLD:-auto}
+  Prefill batch barrier: ${PREFILL_BATCH_BARRIER:-0}
   MTP tokens:           $MTP_K
   Message type:         $message_type
   Chat template:        $(current_template_label)

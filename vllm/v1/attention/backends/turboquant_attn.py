@@ -533,6 +533,7 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         prefix_combine_supported = (
             getattr(self.kv_cache_spec, "sliding_window", None) is None
         )
+        pin_memory = self._device.type == "cuda" and torch.cuda.is_available()
         for request_idx in range(num_decodes, num_reqs):
             q_len = int(q_lens[request_idx])
             seq_len = int(seq_lens[request_idx])
@@ -543,12 +544,14 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             ):
                 continue
             cached_len = seq_len - q_len
-            qo_indptr = torch.tensor([0, q_len], dtype=torch.int32, pin_memory=True)
+            qo_indptr = torch.tensor(
+                [0, q_len], dtype=torch.int32, pin_memory=pin_memory
+            )
             if prefix_combine_supported and _tq_continuation_prefix_combine_enabled(
                 seq_len
             ):
                 prefix_kv_indptr = torch.tensor(
-                    [0, cached_len], dtype=torch.int32, pin_memory=True
+                    [0, cached_len], dtype=torch.int32, pin_memory=pin_memory
                 )
                 prefix_wrapper = _get_or_plan_tq_flashinfer_prefill_wrapper(
                     self._device,
@@ -581,7 +584,7 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
                     },
                 )
                 current_kv_indptr = torch.tensor(
-                    [0, q_len], dtype=torch.int32, pin_memory=True
+                    [0, q_len], dtype=torch.int32, pin_memory=pin_memory
                 )
                 current_wrapper = _get_or_plan_tq_flashinfer_prefill_wrapper(
                     self._device,
@@ -623,7 +626,9 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
                         "TurboQuant fast route could not plan FlashInfer "
                         "continuation prefix-combine wrappers."
                     )
-            kv_indptr = torch.tensor([0, seq_len], dtype=torch.int32, pin_memory=True)
+            kv_indptr = torch.tensor(
+                [0, seq_len], dtype=torch.int32, pin_memory=pin_memory
+            )
             plan_key = (
                 "continuation",
                 Hq,

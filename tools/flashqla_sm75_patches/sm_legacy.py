@@ -170,3 +170,48 @@ def chunk_gated_delta_rule_fwd_legacy(
     _debug_tensor("final_state", final_state)
     _debug_sync("after ext.gdn_forward", out)
     return out, final_state
+
+
+def chunk_gated_delta_rule_fwd_legacy_varlen(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run one packed-varlen GDN batch in a single CUDA launch.
+
+    Inputs use vLLM's packed layout ``[1, total_tokens, heads, dim]`` and
+    ``cu_seqlens`` identifies each request. The CUDA grid maps its batch axis
+    to requests, so their recurrent scans execute concurrently.
+    """
+    _check_inputs(q, k, v, g, beta, None)
+    if cu_seqlens.device != q.device or cu_seqlens.dtype != torch.int32:
+        raise ValueError("cu_seqlens must be int32 on the same CUDA device")
+    if cu_seqlens.ndim != 1 or cu_seqlens.numel() < 2:
+        raise ValueError("cu_seqlens must have shape [batch + 1]")
+    batch = cu_seqlens.numel() - 1
+    expected_state = (batch, v.shape[2], q.shape[3], q.shape[3])
+    if initial_state is None or initial_state.shape != expected_state:
+        raise ValueError(f"initial_state must have shape {expected_state}")
+    if not initial_state.is_cuda or initial_state.dtype not in (
+        torch.float16,
+        torch.float32,
+    ):
+        raise ValueError("initial_state must be a CUDA float16/float32 tensor")
+    if scale is None:
+        scale = q.shape[-1] ** -0.5
+    ext = _load_ext()
+    return ext.gdn_forward_varlen(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state,
+        float(scale),
+        cu_seqlens,
+    )

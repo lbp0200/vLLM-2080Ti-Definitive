@@ -301,6 +301,16 @@ def test_jit_monitor_verbose_arg():
     assert EngineArgs(model="test", jit_monitor_verbose=True).jit_monitor_verbose
 
 
+def test_prefill_batch_barrier_arg():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    assert parser.parse_args([]).prefill_batch_barrier is False
+    assert parser.parse_args(["--prefill-batch-barrier"]).prefill_batch_barrier
+    assert not parser.parse_args(
+        ["--no-prefill-batch-barrier"]
+    ).prefill_batch_barrier
+
+
 @pytest.mark.parametrize("mode", ["warn", "error"])
 def test_jit_monitor_mode_arg(mode):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())

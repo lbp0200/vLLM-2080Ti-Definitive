@@ -66,13 +66,18 @@ __global__ void gdn_forward_kernel(const scalar_t* __restrict__ q,
                                    int64_t state_stride_h,
                                    int64_t state_stride_row,
                                    int64_t state_stride_col,
-                                   float scale) {
+                                   float scale,
+                                   const int32_t* cu_seqlens,
+                                   int input_batch) {
   static_assert(D % (COLS * (32 / WIDTH)) == 0);
   constexpr int subgroups_per_warp = 32 / WIDTH;
   constexpr int rows_per_lane = (D + WIDTH - 1) / WIDTH;
 
   const int hv = blockIdx.x;
   const int b = blockIdx.y;
+  const int seq_start = cu_seqlens == nullptr ? 0 : cu_seqlens[b];
+  const int seq_end = cu_seqlens == nullptr ? tokens : cu_seqlens[b + 1];
+  const int seq_tokens = seq_end - seq_start;
   const int subgroup = threadIdx.x / WIDTH;
   const int lane = threadIdx.x % WIDTH;
   const int group_base =
@@ -103,14 +108,14 @@ __global__ void gdn_forward_kernel(const scalar_t* __restrict__ q,
     }
   }
 
-  for (int t = 0; t < tokens; ++t) {
+  for (int t = 0; t < seq_tokens; ++t) {
     const auto gate_index =
-        static_cast<int64_t>(b) * gate_stride_b +
-        static_cast<int64_t>(t) * gate_stride_t +
+        static_cast<int64_t>(input_batch == 1 ? 0 : b) * gate_stride_b +
+        static_cast<int64_t>(seq_start + t) * gate_stride_t +
         static_cast<int64_t>(hv) * gate_stride_h;
     const auto beta_index =
-        static_cast<int64_t>(b) * beta_stride_b +
-        static_cast<int64_t>(t) * beta_stride_t +
+        static_cast<int64_t>(input_batch == 1 ? 0 : b) * beta_stride_b +
+        static_cast<int64_t>(seq_start + t) * beta_stride_t +
         static_cast<int64_t>(hv) * beta_stride_h;
     float gate_value = 0.0F;
     float beta_value = 0.0F;
@@ -136,13 +141,13 @@ __global__ void gdn_forward_kernel(const scalar_t* __restrict__ q,
       float k_value = 0.0F;
       if (row < D) {
         const auto qk_index =
-            static_cast<int64_t>(b) * q_stride_b +
-            static_cast<int64_t>(t) * q_stride_t +
+            static_cast<int64_t>(input_batch == 1 ? 0 : b) * q_stride_b +
+            static_cast<int64_t>(seq_start + t) * q_stride_t +
             static_cast<int64_t>(hq) * q_stride_h +
             static_cast<int64_t>(row) * q_stride_d;
         const auto kk_index =
-            static_cast<int64_t>(b) * k_stride_b +
-            static_cast<int64_t>(t) * k_stride_t +
+            static_cast<int64_t>(input_batch == 1 ? 0 : b) * k_stride_b +
+            static_cast<int64_t>(seq_start + t) * k_stride_t +
             static_cast<int64_t>(hq) * k_stride_h +
             static_cast<int64_t>(row) * k_stride_d;
         q_value = static_cast<float>(q[qk_index]);
@@ -163,8 +168,8 @@ __global__ void gdn_forward_kernel(const scalar_t* __restrict__ q,
       float delta_value = 0.0F;
       if (lane == 0) {
         const auto v_index =
-            static_cast<int64_t>(b) * v_stride_b +
-            static_cast<int64_t>(t) * v_stride_t +
+            static_cast<int64_t>(input_batch == 1 ? 0 : b) * v_stride_b +
+            static_cast<int64_t>(seq_start + t) * v_stride_t +
             static_cast<int64_t>(hv) * v_stride_h +
             static_cast<int64_t>(col_base + c) * v_stride_d;
         delta_value =
@@ -198,7 +203,8 @@ __global__ void gdn_forward_kernel(const scalar_t* __restrict__ q,
 
     if (lane == 0) {
       const auto out_base =
-          (((static_cast<int64_t>(b) * tokens + t) * v_heads + hv) * D);
+          (((static_cast<int64_t>(input_batch == 1 ? seq_start : b * tokens) +
+             t) * v_heads + hv) * D);
 #pragma unroll
       for (int c = 0; c < COLS; ++c) {
         output[out_base + col_base + c] =
@@ -245,7 +251,9 @@ void launch_gdn_forward(const scalar_t* q,
                         const torch::Tensor& beta_tensor,
                         const torch::Tensor& final_state_tensor,
                         float scale,
-                        cudaStream_t stream) {
+                        cudaStream_t stream,
+                        const int32_t* cu_seqlens = nullptr,
+                        int input_batch = -1) {
   constexpr int cols = D == 128 ? 4 : 1;
   constexpr int width = D == 128 ? 16 : 32;
   constexpr int groups_per_warp = 32 / width;
@@ -290,7 +298,9 @@ void launch_gdn_forward(const scalar_t* q,
                                    final_state_tensor.stride(1),
                                    final_state_tensor.stride(2),
                                    final_state_tensor.stride(3),
-                                   scale);
+                                   scale,
+                                   cu_seqlens,
+                                   input_batch < 0 ? batch : input_batch);
 }
 
 void validate_tensor(const torch::Tensor& tensor,
@@ -306,13 +316,15 @@ void validate_tensor(const torch::Tensor& tensor,
 
 }  // namespace
 
-std::vector<torch::Tensor> gdn_forward(torch::Tensor q,
-                                       torch::Tensor k,
-                                       torch::Tensor v,
-                                       torch::Tensor gate,
-                                       torch::Tensor beta,
-                                       c10::optional<torch::Tensor> initial_state,
-                                       double scale) {
+std::vector<torch::Tensor> gdn_forward_impl(
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor gate,
+    torch::Tensor beta,
+    c10::optional<torch::Tensor> initial_state,
+    double scale,
+    c10::optional<torch::Tensor> cu_seqlens) {
   validate_tensor(q, "q", 4);
   validate_tensor(k, "k", 4);
   validate_tensor(v, "v", 4);
@@ -325,14 +337,29 @@ std::vector<torch::Tensor> gdn_forward(torch::Tensor q,
               "gate and beta must have the same dtype");
 
   TORCH_CHECK(q.sizes() == k.sizes(), "q and k must have the same shape");
-  const int batch = static_cast<int>(q.size(0));
+  const int input_batch = static_cast<int>(q.size(0));
   const int tokens = static_cast<int>(q.size(1));
   const int q_heads = static_cast<int>(q.size(2));
   const int dim = static_cast<int>(q.size(3));
   const int v_heads = static_cast<int>(v.size(2));
-  TORCH_CHECK(v.size(0) == batch && v.size(1) == tokens && v.size(3) == dim,
+  torch::Tensor offsets;
+  const bool ragged = cu_seqlens.has_value() && cu_seqlens.value().defined();
+  if (ragged) {
+    offsets = cu_seqlens.value();
+    TORCH_CHECK(offsets.is_cuda(), "cu_seqlens must be a CUDA tensor");
+    TORCH_CHECK(offsets.scalar_type() == torch::kInt32,
+                "cu_seqlens must be int32");
+    TORCH_CHECK(offsets.dim() == 1 && offsets.size(0) >= 2,
+                "cu_seqlens must have shape [batch + 1]");
+    TORCH_CHECK(input_batch == 1,
+                "packed varlen inputs must have batch dimension 1");
+  }
+  const int batch = ragged ? static_cast<int>(offsets.size(0) - 1)
+                           : input_batch;
+  TORCH_CHECK(v.size(0) == input_batch && v.size(1) == tokens &&
+                  v.size(3) == dim,
               "v must have shape [B, T, Hv, D] matching q/k");
-  TORCH_CHECK(gate.size(0) == batch && gate.size(1) == tokens &&
+  TORCH_CHECK(gate.size(0) == input_batch && gate.size(1) == tokens &&
                   gate.size(2) == v_heads,
               "gate must have shape [B, T, Hv]");
   TORCH_CHECK(beta.sizes() == gate.sizes(),
@@ -350,12 +377,13 @@ std::vector<torch::Tensor> gdn_forward(torch::Tensor q,
                 "initial_state must have shape [B, Hv, D, D]");
   }
 
-  auto output = torch::empty({batch, tokens, v_heads, dim}, q.options());
+  auto output = torch::empty({input_batch, tokens, v_heads, dim}, q.options());
   auto final_state = h0.defined()
                          ? h0
                          : torch::empty({batch, v_heads, dim, dim}, q.options());
 
   const auto stream = at::cuda::getCurrentCUDAStream(q.device().index()).stream();
+  const int32_t* offsets_ptr = ragged ? offsets.data_ptr<int32_t>() : nullptr;
   AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "gdn_forward_data", [&] {
     using data_t = scalar_t;
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(gate.scalar_type(), "gdn_forward_gate", [&] {
@@ -387,7 +415,9 @@ std::vector<torch::Tensor> gdn_forward(torch::Tensor q,
                 beta,
                 final_state,
                 static_cast<float>(scale),
-                stream);
+                stream,
+                offsets_ptr,
+                input_batch);
             break;
           case 32:
             launch_gdn_forward<data_t, gate_scalar_t, state_scalar_t, 32>(
@@ -410,7 +440,9 @@ std::vector<torch::Tensor> gdn_forward(torch::Tensor q,
                 beta,
                 final_state,
                 static_cast<float>(scale),
-                stream);
+                stream,
+                offsets_ptr,
+                input_batch);
             break;
           case 64:
             launch_gdn_forward<data_t, gate_scalar_t, state_scalar_t, 64>(
@@ -433,7 +465,9 @@ std::vector<torch::Tensor> gdn_forward(torch::Tensor q,
                 beta,
                 final_state,
                 static_cast<float>(scale),
-                stream);
+                stream,
+                offsets_ptr,
+                input_batch);
             break;
           case 128:
             launch_gdn_forward<data_t, gate_scalar_t, state_scalar_t, 128>(
@@ -456,7 +490,9 @@ std::vector<torch::Tensor> gdn_forward(torch::Tensor q,
                 beta,
                 final_state,
                 static_cast<float>(scale),
-                stream);
+                stream,
+                offsets_ptr,
+                input_batch);
             break;
         }
       });
@@ -466,6 +502,34 @@ std::vector<torch::Tensor> gdn_forward(torch::Tensor q,
   return {output, final_state};
 }
 
+std::vector<torch::Tensor> gdn_forward(
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor gate,
+    torch::Tensor beta,
+    c10::optional<torch::Tensor> initial_state,
+    double scale) {
+  return gdn_forward_impl(
+      q, k, v, gate, beta, initial_state, scale, c10::nullopt);
+}
+
+std::vector<torch::Tensor> gdn_forward_varlen(
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor gate,
+    torch::Tensor beta,
+    c10::optional<torch::Tensor> initial_state,
+    double scale,
+    torch::Tensor cu_seqlens) {
+  return gdn_forward_impl(
+      q, k, v, gate, beta, initial_state, scale, cu_seqlens);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gdn_forward", &gdn_forward, "SM70/SM75 legacy GDN forward");
+  m.def("gdn_forward_varlen",
+        &gdn_forward_varlen,
+        "SM70/SM75 legacy packed-varlen GDN forward");
 }

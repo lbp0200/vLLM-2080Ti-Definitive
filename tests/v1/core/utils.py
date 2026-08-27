@@ -76,6 +76,7 @@ def create_scheduler(
     kv_cache_spec: KVCacheSpec | None = None,
     per_request_spec_decode_metrics: str = "none",
     scheduling_policy: SchedulerPolicy = "fcfs",
+    prefill_batch_barrier: bool = False,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -188,6 +189,9 @@ def create_scheduler(
         ec_transfer_config=ec_transfer_config,
         observability_config=ObservabilityConfig(
             per_request_spec_decode_metrics=per_request_spec_decode_metrics,
+        ),
+        additional_config=(
+            {"prefill_batch_barrier": True} if prefill_batch_barrier else {}
         ),
     )
     if kv_cache_spec is None:

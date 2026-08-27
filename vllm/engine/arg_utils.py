@@ -793,6 +793,7 @@ class EngineArgs:
         Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
     ) = None
     kda_decode_backend: Literal["auto", "native", "flashinfer", "triton"] | None = None
+    prefill_batch_barrier: bool = False
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1796,6 +1797,12 @@ class EngineArgs:
             default=None,
             help="Select KDA decode backend.",
         )
+        parser.add_argument(
+            "--prefill-batch-barrier",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Align peer prefill frontiers so they enter decode as one batch.",
+        )
         return parser
 
     @classmethod
@@ -2645,6 +2652,8 @@ class EngineArgs:
             self.additional_config["kda_prefill_backend"] = self.kda_prefill_backend
         if self.kda_decode_backend is not None:
             self.additional_config["kda_decode_backend"] = self.kda_decode_backend
+        if self.prefill_batch_barrier:
+            self.additional_config["prefill_batch_barrier"] = True
 
         config = VllmConfig(
             model_config=model_config,
