@@ -14,8 +14,17 @@ This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately fro
 - Re-aligns Mamba offload hit boundaries after per-group chunk clamps so hybrid recurrent state cannot extend beyond the reported attention prefix.
 - Retains the existing 0.2.x `max_model_len`-aware TurboQuant continuation workspace reservation, which is already the current-architecture equivalent of the 0.1.x #134 fix.
 - Adds packed-varlen FlashQLA execution for SM70/SM75 Qwen GDN prefills, mapping concurrent sequences onto the CUDA grid batch axis instead of falling back to a serial or unsupported path.
+- Makes the packed-varlen ABI a build/runtime gate: patch application and `build.sh` require both `gdn_forward` and `gdn_forward_varlen`, and an explicitly requested legacy backend fails early if an old `.so` is still present.
 - Adds the opt-in `--prefill-batch-barrier` scheduler mode. Peer requests advance on a shared prefill frontier and submit their final prefill together, so the first generated token no longer escapes before the rest of the cohort enters decode.
 - Adds the validated `qwen3.8-27b/normal/nvfp4/fp8kv-16K-nomtp-concurrent.env` profile and fixes route-profile propagation of `DISABLE_PREFIX_CACHING`.
+- Resolves numeric launcher GPU selections through `nvidia-smi` to physical UUIDs,
+  preventing mixed T10/RTX 2080 Ti ordinal mismatches, and uses the bounded
+  no-MTP decode graph ladder `[1,2,4,8,16]` for the shipped eight-sequence route.
+- Reuses the caller-owned Qwen GDN pure-prefill output buffer and plans
+  TurboQuant mixed first-chunk FlashInfer wrappers per request, covering the
+  decode-plus-first-chunk batch shape used by the concurrency route.
+- Pins `humming-kernels[cu13]==0.1.13` for the INT6/AutoRound loading fix
+  reported in issue #112; the full Minachist checkpoint remains unverified.
 - Uses a collision-free `file://` rendezvous for single-node multiprocessing and uniprocess executors, eliminating startup port races while retaining TCP rendezvous for multi-node and data-parallel groups.
 - Evaluates all changes merged by stable `v0.1.17`: #125, #129, #132, and #133 are migrated in the current architecture; #128 and #130 are absorbed by the newer sampling/parser paths; #134 is already covered by the 0.2.x workspace reservation.
 

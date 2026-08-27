@@ -98,6 +98,20 @@ __all__ = ["chunk_gated_delta_rule"]
             raise SystemExit(f"missing FlashQLA target file: {dst}")
         shutil.copyfile(src, dst)
 
+    legacy_text = (patch_root / "sm_legacy.py").read_text(encoding="utf-8")
+    cuda_text = (patch_root / "gdn_forward.cu").read_text(encoding="utf-8")
+    required = {
+        "sm_legacy.py": ("chunk_gated_delta_rule_fwd_legacy_varlen",),
+        "gdn_forward.cu": ("gdn_forward_varlen", "cu_seqlens"),
+    }
+    for name, symbols in required.items():
+        text = legacy_text if name == "sm_legacy.py" else cuda_text
+        missing = [symbol for symbol in symbols if symbol not in text]
+        if missing:
+            raise SystemExit(
+                f"FlashQLA SM75 patch {name} is incomplete; missing: {', '.join(missing)}"
+            )
+
     return 0
 
 

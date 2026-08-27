@@ -137,7 +137,18 @@ def _preload_flashqla_legacy_extension() -> None:
     load_ext = getattr(_flashqla_legacy_module, "_load_ext", None)
     if load_ext is None:
         raise ImportError("FlashQLA SM75 legacy module has no _load_ext function")
-    load_ext()
+    extension = load_ext()
+    missing = [
+        name
+        for name in ("gdn_forward", "gdn_forward_varlen")
+        if not hasattr(extension, name)
+    ]
+    if missing:
+        raise RuntimeError(
+            "FlashQLA SM70/SM75 extension is stale; missing exported symbols: "
+            + ", ".join(missing)
+            + ". Re-run build.sh after applying the packed-varlen patch."
+        )
 
 
 def _resolve_gdn_prefill_backend(
@@ -208,10 +219,15 @@ def _resolve_gdn_prefill_backend(
             # while a graph is being captured.
             _preload_flashqla_legacy_extension()
             supports_flashqla_legacy = True
-        except (ImportError, OSError, RuntimeError, ValueError):
+        except (ImportError, OSError, RuntimeError, ValueError) as exc:
             # FlashQLA is an optional SM75 build dependency.  Keep the stock
             # Triton route usable when it is not present.
             supports_flashqla_legacy = False
+            if backend == "flashqla_legacy":
+                raise RuntimeError(
+                    "gdn_prefill_backend=flashqla_legacy requires the rebuilt "
+                    "SM70/SM75 FlashQLA extension with gdn_forward_varlen"
+                ) from exc
 
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
         return backend, "flashinfer"
@@ -1772,6 +1788,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_has_initial_state is not None
             initial_state = ssm_state[prefill_state_indices]
             initial_state[~prefill_has_initial_state, ...] = 0
+            # The chunk kernel can write directly into the caller-owned
+            # output buffer. Keep decode-first batches offset past their
+            # peeled decode tokens; pure prefills start at element zero.
+            prefill_core_attn_out = None
+            if spec_sequence_masks is None:
+                prefill_len = query_non_spec.shape[1]
+                prefill_start = num_decode_tokens if split_non_spec else 0
+                prefill_end = prefill_start + prefill_len
+                prefill_core_attn_out = core_attn_out[prefill_start:prefill_end]
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -1787,6 +1812,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 chunk_indices=attn_metadata.chunk_indices,
                 chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
+                core_attn_out=prefill_core_attn_out,
             )
             # Init cache
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
@@ -1797,6 +1823,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec], dim=1
                 )
+            elif spec_sequence_masks is None:
+                # The pure-prefill result already aliases core_attn_out.
+                core_attn_out_non_spec = None
         elif attn_metadata.num_decodes > 0:
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
@@ -1833,7 +1862,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
-        else:
+        elif core_attn_out_non_spec is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
     def _forward_core_decode_aiter(

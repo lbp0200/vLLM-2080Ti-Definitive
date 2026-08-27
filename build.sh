@@ -274,7 +274,16 @@ prepare_flashqla_sm75() {
 from flash_qla.ops.gated_delta_rule.legacy.sm_legacy import _load_ext
 
 extension = _load_ext()
+required = ("gdn_forward", "gdn_forward_varlen")
+missing = [name for name in required if not hasattr(extension, name)]
+if missing:
+    raise SystemExit(
+        "FlashQLA extension is stale; missing exported symbols: "
+        + ", ".join(missing)
+        + ". Re-run the build after applying the SM75 packed-varlen patch."
+    )
 print(f"FlashQLA extension: {extension.__file__}")
+print("FlashQLA symbols: " + ", ".join(required))
 PY
 
   export FLASHQLA_DIR="$flashqla_dir"
@@ -309,10 +318,12 @@ if [[ -n "$git_mirror_prefix" ]]; then
   export GIT_CONFIG_VALUE_0="https://github.com/"
 fi
 
-# A source snapshot made with git archive has no SCM metadata. Keep the
-# package version deterministic in that supported validation layout.
-if [[ ! -e .git ]]; then
+# A source snapshot made with git archive, or a copied worktree whose `.git`
+# file points at unavailable metadata, has no usable SCM information. Keep
+# the package version deterministic in both supported validation layouts.
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   export VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-$BASE_VLLM_VERSION}"
+  export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM:-$BASE_VLLM_VERSION}"
 fi
 
 if [[ ! -x "$python_bin" ]]; then
@@ -369,7 +380,15 @@ if os.environ.get("FLASHQLA_ENABLED") == "1":
     from flash_qla.ops.gated_delta_rule.legacy.sm_legacy import _load_ext
 
     extension = _load_ext()
+    required = ("gdn_forward", "gdn_forward_varlen")
+    missing = [name for name in required if not hasattr(extension, name)]
+    if missing:
+        raise SystemExit(
+            "FlashQLA extension is stale; missing exported symbols: "
+            + ", ".join(missing)
+        )
     print(f"FlashQLA extension: {extension.__file__}")
+    print("FlashQLA symbols: " + ", ".join(required))
 PY
 
 echo "BUILD SUCCEEDED"

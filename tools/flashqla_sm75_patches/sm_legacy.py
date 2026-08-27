@@ -10,6 +10,21 @@ import torch
 from torch.utils.cpp_extension import load
 
 _EXT = None
+_REQUIRED_EXTENSION_SYMBOLS = ("gdn_forward", "gdn_forward_varlen")
+
+
+def _validate_extension(extension):
+    """Reject an old SM75 binary before it can enter a varlen prefill."""
+    missing = [
+        name for name in _REQUIRED_EXTENSION_SYMBOLS if not hasattr(extension, name)
+    ]
+    if missing:
+        raise RuntimeError(
+            "FlashQLA SM70/SM75 extension is stale; missing exported symbols: "
+            + ", ".join(missing)
+            + ". Re-run build.sh after applying the packed-varlen patch."
+        )
+    return extension
 
 
 def _debug_legacy_enabled() -> bool:
@@ -75,13 +90,14 @@ def _load_ext():
     src = Path(__file__).with_name("csrc") / "gdn_forward.cu"
     default_root = Path(__file__).resolve().parents[4] / ".torch_extensions_vllm_flashqla_legacy"
     os.environ.setdefault("TORCH_EXTENSIONS_DIR", str(default_root))
-    _EXT = load(
+    extension = load(
         name="flash_qla_legacy_gdn",
         sources=[str(src)],
         extra_cuda_cflags=["-O3"],
         extra_cflags=["-O3"],
         verbose=bool(int(os.environ.get("FLASH_QLA_LEGACY_VERBOSE_BUILD", "0"))),
     )
+    _EXT = _validate_extension(extension)
     return _EXT
 
 
