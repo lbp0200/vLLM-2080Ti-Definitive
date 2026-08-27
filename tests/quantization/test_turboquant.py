@@ -581,11 +581,12 @@ class TestTurboQuantPrefixCombine:
             seq_lens_cpu_upper_bound=torch.tensor([32768], dtype=torch.int32),
         )
 
-        first_chunk, continuation, prefix_combine = (
+        first_chunk, first_chunks, continuation, prefix_combine = (
             builder._plan_flashinfer_prefill_wrappers(cam, num_decodes=0)
         )
 
         assert first_chunk is None
+        assert first_chunks is None
         assert [call[0][0] for call in calls] == expected_plan_names
         if sliding_window is None:
             assert continuation is None
@@ -606,6 +607,52 @@ class TestTurboQuantPrefixCombine:
         else:
             assert continuation == {0: "continuation"}
             assert prefix_combine is None
+
+    def test_plans_mixed_first_chunk_per_request(self, monkeypatch):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        calls = []
+
+        def fake_plan(device, plan_key, plan_kwargs):
+            calls.append((plan_key, plan_kwargs))
+            return plan_key[0]
+
+        monkeypatch.setattr(
+            turboquant_attn,
+            "_get_or_plan_tq_flashinfer_prefill_wrapper",
+            fake_plan,
+        )
+        monkeypatch.setattr(
+            turboquant_attn, "_TQ_CONTINUATION_PREFIX_COMBINE_MODE", "off"
+        )
+
+        builder = object.__new__(turboquant_attn.TurboQuantMetadataBuilder)
+        builder._flashinfer_prefill_enabled = True
+        builder._device = torch.device("cpu")
+        builder._flashinfer_num_qo_heads = 8
+        builder._flashinfer_num_kv_heads = 4
+        builder._flashinfer_head_dim = 128
+        builder._flashinfer_dtype = torch.float16
+        builder._flashinfer_scale = 128**-0.5
+        builder.kv_cache_spec = SimpleNamespace(sliding_window=4096)
+        cam = SimpleNamespace(
+            max_query_len=256,
+            max_seq_len=32768,
+            query_start_loc_cpu=torch.tensor([0, 1, 257], dtype=torch.int32),
+            seq_lens_cpu_upper_bound=torch.tensor([128, 256], dtype=torch.int32),
+        )
+
+        first_chunk, first_chunks, continuation, prefix_combine = (
+            builder._plan_flashinfer_prefill_wrappers(cam, num_decodes=1)
+        )
+
+        assert first_chunk is None
+        assert first_chunks == {1: "mixed_first_chunk"}
+        assert continuation is None
+        assert prefix_combine is None
+        assert [call[0][0] for call in calls] == ["mixed_first_chunk"]
+        assert calls[0][1]["qo_indptr"].tolist() == [0, 256]
+        assert calls[0][1]["kv_indptr"].tolist() == [0, 256]
 
 # ============================================================================
 # Centroids tests (CPU-only)

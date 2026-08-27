@@ -16,7 +16,7 @@ This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately fro
 - Adds packed-varlen FlashQLA execution for SM70/SM75 Qwen GDN prefills, mapping concurrent sequences onto the CUDA grid batch axis instead of falling back to a serial or unsupported path.
 - Makes the packed-varlen ABI a build/runtime gate: patch application and `build.sh` require both `gdn_forward` and `gdn_forward_varlen`, and an explicitly requested legacy backend fails early if an old `.so` is still present.
 - Adds the opt-in `--prefill-batch-barrier` scheduler mode. Peer requests advance on a shared prefill frontier and submit their final prefill together, so the first generated token no longer escapes before the rest of the cohort enters decode.
-- Adds the validated `qwen3.8-27b/normal/nvfp4/fp8kv-16K-nomtp-concurrent.env` profile and fixes route-profile propagation of `DISABLE_PREFIX_CACHING`.
+- Adds the validated `qwen27b/w4a16/normal/fp8kv-16K-nomtp-concurrent.env` profile and fixes route-profile propagation of `DISABLE_PREFIX_CACHING`.
 - Resolves numeric launcher GPU selections through `nvidia-smi` to physical UUIDs,
   preventing mixed T10/RTX 2080 Ti ordinal mismatches, and uses the bounded
   no-MTP decode graph ladder `[1,2,4,8,16]` for the shipped eight-sequence route.

@@ -32,5 +32,6 @@ quack-kernels==0.6.5  # Required by MSA
 # Tokenspeed_MLA for faster mla with spec decode
 tokenspeed-mla==0.1.8; platform_system == "Linux"
 
-# Humming kernels for quantization gemm
-humming-kernels[cu13]==0.1.12
+# Humming kernels for quantization gemm. 0.1.13 contains the INT6/
+# AutoRound loading fixes reported in issue #112.
+humming-kernels[cu13]==0.1.13

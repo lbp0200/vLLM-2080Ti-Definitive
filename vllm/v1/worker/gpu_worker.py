@@ -540,6 +540,11 @@ class Worker(WorkerBase):
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
+            from vllm.v1.attention.backends.flashinfer import (
+                reserve_flashinfer_workspace_for_profiling,
+            )
+
+            reserve_flashinfer_workspace_for_profiling(self.vllm_config, self.device)
             self.model_runner.profile_run()
 
             msg = (
@@ -567,6 +572,11 @@ class Worker(WorkerBase):
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
+            from vllm.v1.attention.backends.flashinfer import (
+                reserve_flashinfer_workspace_for_profiling,
+            )
+
+            reserve_flashinfer_workspace_for_profiling(self.vllm_config, self.device)
             self.model_runner.profile_run()
 
         # Profile CUDA graph memory if graphs will be captured.

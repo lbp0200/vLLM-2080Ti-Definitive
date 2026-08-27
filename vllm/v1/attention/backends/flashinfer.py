@@ -100,6 +100,65 @@ FP4_DTYPE = torch.uint8
 logger = init_logger(__name__)
 
 trtllm_workspace_buffer = None
+_flashinfer_workspace_buffers: dict[tuple[str, int | None], torch.Tensor] = {}
+
+
+def _flashinfer_workspace_buffer_size(
+    max_num_batched_tokens: int,
+    num_qo_heads: int,
+    head_dim: int,
+) -> int:
+    buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
+    if envs.VLLM_BATCH_INVARIANT:
+        return FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
+
+    # FlashInfer prefill temporary buffers scale with the prefill chunk and
+    # query-head footprint, not with the allocated KV-cache length.
+    prefill_workspace = (
+        max_num_batched_tokens
+        * num_qo_heads
+        * head_dim
+        * FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM
+    )
+    return max(buffer_size, prefill_workspace)
+
+
+def _get_shared_flashinfer_workspace_buffer(
+    device: torch.device, buffer_size: int
+) -> torch.Tensor:
+    key = (device.type, device.index)
+    buffer = _flashinfer_workspace_buffers.get(key)
+    if buffer is None or buffer.numel() < buffer_size:
+        buffer = torch.zeros(buffer_size, dtype=torch.uint8, device=device)
+        _flashinfer_workspace_buffers[key] = buffer
+    return buffer
+
+
+def reserve_flashinfer_workspace_for_profiling(
+    vllm_config: VllmConfig, device: torch.device
+) -> None:
+    """Include the live FlashInfer workspace in automatic KV sizing.
+
+    The metadata builder is created only after the KV cache is sized. Without
+    this reservation, a large KV cache can leave less than the persistent
+    FlashInfer workspace, turning the first real request into an OOM.
+    """
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.config import get_layers_from_vllm_config
+
+    required_size = 0
+    for layer in get_layers_from_vllm_config(vllm_config, Attention).values():
+        if layer.get_attn_backend() is FlashInferBackend:
+            required_size = max(
+                required_size,
+                _flashinfer_workspace_buffer_size(
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    layer.num_heads,
+                    layer.head_size,
+                ),
+            )
+    if required_size:
+        _get_shared_flashinfer_workspace_buffer(device, required_size)
 
 
 def _get_trtllm_workspace_buffer():
@@ -1013,26 +1072,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
-            buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
-            if envs.VLLM_BATCH_INVARIANT:
-                buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
-            else:
-                # FlashInfer prefill temp buffers (batch_prefill_tmp_v, ...)
-                # scale with the prefill chunk and query-head footprint, NOT
-                # context length. The fixed ~394 MiB default is too small for
-                # wide-head models at the default 8192-token chunk on some
-                # archs (e.g. sm_120), where FlashInfer hard-errors instead of
-                # growing. Size to the batch's head footprint; never shrink
-                # below the configured default.
-                est = (
-                    self.max_num_batched_tokens
-                    * self.num_qo_heads
-                    * self.head_dim
-                    * FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM
-                )
-                buffer_size = max(buffer_size, est)
-            self._workspace_buffer = torch.zeros(
-                buffer_size, dtype=torch.uint8, device=self.device
+            self._workspace_buffer = _get_shared_flashinfer_workspace_buffer(
+                self.device,
+                _flashinfer_workspace_buffer_size(
+                    self.max_num_batched_tokens,
+                    self.num_qo_heads,
+                    self.head_dim,
+                ),
             )
         return self._workspace_buffer
 

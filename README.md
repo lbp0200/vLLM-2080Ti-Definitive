@@ -52,104 +52,24 @@ deployment route.
 
 The disposition of the previously merged SM75 PRs is recorded in [the 0.2.x PR migration audit](docs/0.2.x-pr-migration-audit.md).
 
-## Core Routes
-
-Serving shape:
-
-- The default profiles remain latency-oriented for one personal-agent style
-  workload and the largest practical context window this hardware can sustain.
-- Pre3 also adds an opt-in throughput route for synchronized long-prompt
-  cohorts. Packed-varlen FlashQLA and the shared prefill frontier keep peer
-  requests together through their final prefill step, then execute decode as
-  one real batch. This is bounded local concurrency, not a claim that dual
-  2080 Ti is a general multi-tenant serving cluster.
-
-Status: validated means evidence exists for the stated route; experimental
-means partial or historical evidence; unsupported means a known missing path.
-
-### Qwen3.8 27B
-
-Qwen3.8 27B is the active SM75 validation lane. Every row below was launched
-through the listed shipped profile on the physical dual-2080-Ti NVLink pair
-with TP=2 and non-eager CUDA Graph execution. The figures are the highest valid
-prefill / decode result from three independent 4K-input, 128-output requests
-with distinct prompts. Prefix-cache hits and failed quality probes are excluded.
-
-| Checkpoint | Shipped profile (`PROFILE`, `MODE`) | 4K/128 prefill / decode tok/s |
-| --- | --- | ---: |
-| [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | `qwen3.8-27b/normal/fp8/fp16kv-128K-mtp3-text-only.env`, `normal` | 1496.95 / 83.90 |
-| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/normal/fp8/fp16kv-144K-nomtp-text-only.env`, `normal` | 1501.39 / 30.40 |
-| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/fast/fp8/tqk8v4-256K-mtp3-text-only.env`, `fast` | 1525.37 / 83.51 |
-| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/normal/fp8/fp16kv-104K-mtp3-text-image.env`, `normal` | 1506.86 / 82.88 |
-| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/fast/fp8/tqk8v4-240K-mtp3-text-image.env`, `fast` | 1355.04 / 73.48 |
-| [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | `qwen3.8-27b/normal/nvfp4/fp8kv-240K-nomtp-text-only.env`, `normal` | 1421.10 / 38.89 |
-| unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-only.env`, `fast` | 1411.91 / 102.60 |
-| unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/normal/nvfp4/fp8kv-240K-mtp3-text-image.env`, `normal` | 1266.09 / 55.69 |
-| unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-image.env`, `fast` | 1276.92 / 83.99 |
-
-The pre3 true-concurrency profile is
-`qwen3.8-27b/normal/nvfp4/fp8kv-16K-nomtp-concurrent.env`. On the same physical
-dual-2080-Ti TP=2 pair, with no MTP, non-eager CUDA Graphs, prefix caching
-disabled, and exact 4096-input/128-output requests, strict full-window
-aggregate decode measured `41.53 / 79.94 / 151.19 / 269.30` tok/s at
-concurrency `1 / 2 / 4 / 8`. The metric covers the interval from the first
-request's first token until the last request completes; C8 is 6.48x C1 and its
-first-token spread is 1.447 ms.
-
-The FP8 and Unsloth NVFP4 pure-text routes passed the `PROFILE_OK` quality
-probe and produced exactly 128/128 output in the measured runs. The official
-FP8 route uses Marlin weight-only FP8 with FP16 KV or TurboQuant K8V4; the
-Unsloth checkpoint uses `compressed-tensors`, SM75 Marlin NVFP4/FP8 linear
-subsets, and FP8 KV or TurboQuant K8V4 as listed.
-
-The following candidates have short-route evidence but are **experimental**, not
-promoted deployment profiles: `pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB` uses a
-different ModelOpt format and its own `qwen27b/experimental/nvfp4` profiles;
-`RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP` uses the 32K
-`qwen27b/experimental/int8-w8a8` profiles. Neither inherits quality or capacity
-claims from the formal FP8/Unsloth routes. MXFP4 remains unsupported on SM75
-because the required upstream Marlin kernel variants are not generated there.
-
-See the [testing call](docs/0.2.1-pre-testing-call.md) for the complete
-profile-first evidence matrix and the [migration report](docs/2080ti-0.2.1-pre-validation.md)
-for graph modes, controlled comparisons, regression tests, and known limits.
-
-### Qwen3.x 35B FP8
-
-The FP8 35B routes are retained from the validated `v0.1.x` dual-2080-Ti
-profile set. They remain useful compatibility references, but require separate
-cu130 revalidation before being promoted as `0.2.1-pre3` deployment presets.
-
-The retained set covers FP16-KV 256K text-only `normal` / `aggressive`,
-FP16-KV 136K text-and-image `normal` / `aggressive`, and a 178K `fast` MTP3
-profile.
-
-### Gemma4 Baseline Support
-
-Gemma4 has baseline model/runtime support in this tree. It is not part of the
-current `0.2.1-pre3` SM75 promotion set. Checkpoint forms, MTP requirements,
-KV-cache limits, multimodal status, and the distinction between historical and
-cu130 evidence are documented in [Gemma4 SM75 support notes](docs/gemma4-sm75-support.md).
+The launcher supports selecting tensor parallelism (`TP_SIZE`) and pipeline
+parallelism (`PP_SIZE`), including mixed TP/PP inference layouts when the
+visible GPU count matches the requested topology. The primary validated
+deployment remains dual RTX 2080 Ti with TP=2 and PP=1; other layouts are
+available for engineering tests and require separate validation.
 
 ## Tested Model Checkpoints
 
-This is the intentionally narrow `0.2.x` checkpoint list. "Validated" means
-the listed shipped profile completed on the physical dual-2080-Ti NVLink pair;
-it does not claim every context, KV dtype, or MTP setting for that checkpoint.
-The 35B row is retained `v0.1.x` evidence and is explicitly not cu130 promotion
-evidence.
+Current model and weight routes. Individual serving presets and measurements
+are listed in the [Profile Guide](profiles/README.md).
 
-| Model route | Weight route | Model cards | Status |
+| Model route | Weight route | Model card | Recommended use |
 | --- | --- | --- | --- |
-| Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | Validated formal text-only and text+image profiles |
-| Qwen3.8 27B | NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | Validated formal text-only and text+image profiles |
-| Qwen3.8 27B | NVFP4 | [pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB](https://huggingface.co/pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB) | Experimental ModelOpt short-route evidence only |
-| Qwen3.8 27B | INT8 W8A8 | [RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP](https://huggingface.co/RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP) | Experimental 32K short-route evidence only |
-| Qwen3.x 35B | FP8 | [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8)<br>[Jackrong/Qwopus3.6-35B-A3B-Coder-FP8](https://huggingface.co/Jackrong/Qwopus3.6-35B-A3B-Coder-FP8)<br>[kyr0/Ornith-35B-FP8-E4M3-MTP](https://huggingface.co/kyr0/Ornith-35B-FP8-E4M3-MTP) | Validated on `v0.1.x`; cu130 revalidation pending |
+| Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | High-precision single-request inference |
+| Qwen3.8 27B | NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | Long-context concurrent inference |
+| Qwen3.x 35B | FP8 | [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8) | Fast personal inference |
 
 ## Build And Launch
-
-Clone this repository and use the migration build entry point:
 
 ```bash
 git clone https://github.com/weicj/vLLM-2080Ti-Definitive.git
@@ -158,44 +78,24 @@ git switch --track origin/vllm-2080ti-definitive-0.2.x
 ./build.sh
 ```
 
-`build.sh` creates `.venv`, installs the target dependencies, compiles the CUDA
-extensions, and records the build output under `build-logs/`. It fails closed
-when the target compiler, kernel, or CUDA requirements are not met. Its default
-parallelism is selected from the host CPU and memory; set `MAX_JOBS` or
-`BUILD_MAX_JOBS` only to deliberately override that choice.
-
-After a successful build, start and manage the service through the launcher:
-
 ```bash
-./launcher.sh
-```
-
-The interactive launcher selects the checkpoint, profile, mode, GPU/TP
-devices, port, service scope, chat template, reasoning defaults, and tool
-calling settings. It also shows the service status, PID, API URL, log path,
-prefix-cache state, and reported cache capacity. Select the checkpoint path
-separately from the profile and pin the physical 2080 Ti pair with
-`CUDA_DEVICE_ORDER=PCI_BUS_ID` before selecting GPU IDs on mixed-GPU hosts.
-
-```bash
-CUDA_DEVICE_ORDER=PCI_BUS_ID \
 MODEL_DIR=/path/to/checkpoint \
-PROFILE=qwen3.8-27b/fast/fp8/tqk8v4-256K-mtp3-text-only.env \
+PROFILE=qwen27b/w8a16/fast/tqk8v4-256K-mtp3-text-only.env \
 MODE=fast GPU_DEVICES=4,5 TP_SIZE=2 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
 
-Profiles contain route parameters only. Their capacity and historical
-throughput records are described in [profiles/README.md](profiles/README.md).
-Use `launcher.sh --print-config` before starting a modified route.
+Use `./launcher.sh` for interactive setup or `./launcher.sh --print-config` to
+preview a route. See the [Profile Guide](profiles/README.md) for available
+profiles.
 
 ## Profiles
 
 Start with [the Profile Guide](profiles/README.md). Profiles use the layout
-`profiles/<model>/<mode>/<weight>/<route>.env`; for example,
-`qwen3.8-27b/normal/fp8/fp16kv-128K-mtp3-text-only.env`,
-`qwen35b/aggressive/fp8/fp16kv-256K-nomtp-text-only.env`, and
-`qwen35b/normal/fp8/fp16kv-136K-nomtp-text-image.env`.
+`profiles/<model>/<weight>/<mode>/<route>.env`; for example,
+`qwen27b/w8a16/normal/fp16kv-128K-mtp3-text-only.env`,
+`qwen35b/w8a16/normal/fp16kv-256K-nomtp-text-only.env`, and
+`qwen35b/w8a16/normal/fp16kv-136K-nomtp-text-image.env`.
 
 Available modes:
 
@@ -218,6 +118,8 @@ the profile's quality probe.
 For the current migration, use the exact method and measurements in
 [the validation report](docs/2080ti-0.2.1-pre-validation.md), especially for
 TurboQuant and MTP3. Historical profile capacities are not cu130 evidence.
+INT6/AutoRound checkpoints require `humming-kernels[cu13]==0.1.13`, which is
+the version pinned by this branch; the full Minachist route remains unverified.
 
 ## Hardware Target
 

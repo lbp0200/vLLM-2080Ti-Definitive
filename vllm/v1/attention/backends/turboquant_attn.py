@@ -425,6 +425,7 @@ class TurboQuantMetadata(AttentionMetadata):
     # out of AttentionImpl.forward avoids leaking a Python/JIT operation into
     # the compiled model or its CUDA graph capture.
     flashinfer_first_chunk_wrapper: Any | None = None
+    flashinfer_first_chunk_wrappers: dict[int, Any] | None = None
     flashinfer_continuation_wrappers: dict[int, Any] | None = None
     flashinfer_prefix_combine_wrappers: dict[int, tuple[Any, Any]] | None = None
 
@@ -469,6 +470,7 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
     ) -> tuple[
         Any | None,
         dict[int, Any] | None,
+        dict[int, Any] | None,
         dict[int, tuple[Any, Any]] | None,
     ]:
         """Prepare raw-K/V FlashInfer wrappers before model forward."""
@@ -478,7 +480,7 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             or cam.query_start_loc_cpu is None
             or cam.seq_lens_cpu_upper_bound is None
         ):
-            return None, None, None
+            return None, None, None, None
 
         qsl = cam.query_start_loc_cpu
         seq_lens = cam.seq_lens_cpu_upper_bound
@@ -524,10 +526,12 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
                     "max_sequence_kv": cam.max_seq_len,
                 },
             )
-            return wrapper, None, None
+            return wrapper, None, None, None
 
-        # Continuation K/V is dequantized per request in forward, but its
-        # shapes are known to the scheduler. Plan each eligible request here.
+        # Mixed batches can contain complete first chunks after one or more
+        # decode requests. Plan those requests independently; the batched
+        # ragged plan above is only valid when every request is first-chunk.
+        first_chunk_wrappers: dict[int, Any] = {}
         wrappers: dict[int, Any] = {}
         prefix_combine_wrappers: dict[int, tuple[Any, Any]] = {}
         prefix_combine_supported = (
@@ -537,10 +541,50 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         for request_idx in range(num_decodes, num_reqs):
             q_len = int(q_lens[request_idx])
             seq_len = int(seq_lens[request_idx])
+            if q_len == seq_len and q_len > 0:
+                qo_indptr = torch.tensor(
+                    [0, q_len], dtype=torch.int32, pin_memory=pin_memory
+                )
+                first_chunk_wrappers[request_idx] = (
+                    _get_or_plan_tq_flashinfer_prefill_wrapper(
+                        self._device,
+                        (
+                            "mixed_first_chunk",
+                            Hq,
+                            Hk,
+                            D,
+                            window_left,
+                            str(dtype),
+                            q_len,
+                        ),
+                        {
+                            "qo_indptr": qo_indptr,
+                            "kv_indptr": qo_indptr,
+                            "num_qo_heads": Hq,
+                            "num_kv_heads": Hk,
+                            "head_dim_qk": D,
+                            "causal": True,
+                            "window_left": window_left,
+                            "sm_scale": self._flashinfer_scale,
+                            "pos_encoding_mode": "NONE",
+                            "q_data_type": dtype,
+                            "kv_data_type": dtype,
+                            "seq_lens": torch.tensor(
+                                [q_len], dtype=torch.int32
+                            ),
+                            "seq_lens_q": torch.tensor(
+                                [q_len], dtype=torch.int32
+                            ),
+                            "max_token_per_sequence": q_len,
+                            "max_sequence_kv": q_len,
+                        },
+                    )
+                )
+                continue
             if (
                 q_len <= _CONTINUATION_DECODE_THRESHOLD
                 or q_len < _SM75_TQ_FI_CONTINUATION_MIN_QUERY_LEN
-                or q_len >= seq_len
+                or q_len > seq_len
             ):
                 continue
             cached_len = seq_len - q_len
@@ -660,7 +704,12 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
                     "max_sequence_kv": seq_len,
                 },
             )
-        return None, wrappers or None, prefix_combine_wrappers or None
+        return (
+            None,
+            first_chunk_wrappers or None,
+            wrappers or None,
+            prefix_combine_wrappers or None,
+        )
 
     def _reserve_workspace(self) -> None:
         if not is_workspace_manager_initialized():
@@ -733,7 +782,12 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             cam, decode_threshold=self.reorder_batch_threshold
         )
-        first_chunk_wrapper, continuation_wrappers, prefix_combine_wrappers = (
+        (
+            first_chunk_wrapper,
+            first_chunk_wrappers,
+            continuation_wrappers,
+            prefix_combine_wrappers,
+        ) = (
             self._plan_flashinfer_prefill_wrappers(cam, num_decodes)
         )
 
@@ -751,6 +805,7 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             query_start_loc_cpu=cam.query_start_loc_cpu,
             seq_lens_cpu=cam.seq_lens_cpu_upper_bound,
             flashinfer_first_chunk_wrapper=first_chunk_wrapper,
+            flashinfer_first_chunk_wrappers=first_chunk_wrappers,
             flashinfer_continuation_wrappers=continuation_wrappers,
             flashinfer_prefix_combine_wrappers=prefix_combine_wrappers,
         )
@@ -1158,6 +1213,16 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 seq_lens_cpu=attn_metadata.seq_lens_cpu[num_decodes:]
                 if attn_metadata.seq_lens_cpu is not None
                 else None,
+                flashinfer_first_chunk_wrappers=(
+                    {
+                        request_idx - num_decodes: wrapper
+                        for request_idx, wrapper in (
+                            attn_metadata.flashinfer_first_chunk_wrappers or {}
+                        ).items()
+                        if request_idx >= num_decodes
+                    }
+                    or None
+                ),
                 flashinfer_continuation_wrappers=(
                     {
                         request_idx - num_decodes: wrapper
@@ -1348,6 +1413,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         if (
             _TQ_REQUIRE_FLASHINFER_PREFILL
             and attn_metadata.max_query_len == attn_metadata.max_seq_len
+            and not attn_metadata.flashinfer_first_chunk_wrappers
         ):
             raise RuntimeError(
                 "TurboQuant fast route could not plan FlashInfer prefill; "
@@ -1418,7 +1484,14 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
             if q_len == seq_len:
                 # First-chunk prefill: all K/V are in the current batch.
-                if _HAS_FLASH_ATTN:
+                first_chunk_wrapper = (
+                    attn_metadata.flashinfer_first_chunk_wrappers.get(i)
+                    if attn_metadata.flashinfer_first_chunk_wrappers
+                    else None
+                )
+                if first_chunk_wrapper is not None:
+                    out = first_chunk_wrapper.run(q_seq, k_seq, v_seq)
+                elif _HAS_FLASH_ATTN:
                     # Assign to slice to avoid gpu/cpu sync.
                     self._cu_2[1:2] = q_len
                     cu = self._cu_2

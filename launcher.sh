@@ -834,6 +834,28 @@ profile_family_dir() {
   esac
 }
 
+profile_weight_dir() {
+  local variant=${MODEL_VARIANT:-}
+  local precision
+
+  case "${variant,,}" in
+    fp8|w8a16)
+      printf 'w8a16\n'
+      return 0
+      ;;
+    nvfp4|w4a16|int4|gptq|awq)
+      printf 'w4a16\n'
+      return 0
+      ;;
+  esac
+
+  precision=$(guess_precision_scheme "${MODEL_DIR:-}" "${QUANTIZATION:-}")
+  case "$precision" in
+    W4A16) printf 'w4a16\n' ;;
+    *) printf 'w8a16\n' ;;
+  esac
+}
+
 profile_compatible_modes_for_current() {
   normalize_mode
   local mode=${MODE:-normal}
@@ -2000,14 +2022,15 @@ apply_profile_preset_menu() {
 }
 
 save_current_profile_menu() {
-  local family_dir profile_name safe_name target_dir target_file answer compatible_modes
+  local family_dir weight_dir profile_name safe_name target_dir target_file answer compatible_modes
 
   if ! is_tty; then
     return 0
   fi
 
   family_dir=$(profile_family_dir)
-  target_dir="$PROFILE_DIR/$family_dir/user"
+  weight_dir=$(profile_weight_dir)
+  target_dir="$PROFILE_DIR/$family_dir/$weight_dir/user"
 
   while true; do
     profile_name=$(read_line_with_esc "New profile name [${SERVED_NAME:-user-profile}] (Esc to cancel): ") || return 0
@@ -2060,7 +2083,7 @@ save_current_profile_menu() {
   write_profile_entry "$target_file.tmp" DISABLE_CUSTOM_ALL_REDUCE "${DISABLE_CUSTOM_ALL_REDUCE:-}"
   mv "$target_file.tmp" "$target_file"
 
-  PROFILE="$family_dir/user/${safe_name}.env"
+  PROFILE="$family_dir/$weight_dir/user/${safe_name}.env"
   save_manager_state
   echo "Saved profile: $target_file"
   echo "Compatible mode: $compatible_modes"

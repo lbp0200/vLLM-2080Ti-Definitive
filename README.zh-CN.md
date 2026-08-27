@@ -49,92 +49,22 @@ Graph，把这些硬件资源转成可用的 serving 栈。
 
 此前已合并 SM75 PR 的迁移判断见 [0.2.x PR 迁移审计](docs/0.2.x-pr-migration-audit.md)。
 
-## 核心路线
-
-服务形态：
-
-- 默认 profile 仍以个人 agent 的单请求时延和最大实用上下文为主。
-- pre3 另外加入同步长 prompt cohort 的可选吞吐路线。packed-varlen FlashQLA
-  与 shared prefill frontier 会让同批请求共同完成最后一次 prefill，再作为一个
-  真实 batch 进入 decode。这是有边界的本地并发能力，不代表双 2080 Ti 是通用
-  多租户 serving 集群。
-
-状态说明：已验证表示有对应证据；实验表示只有部分或历史证据；不支持表示已知
-存在缺失路径。
-
-### Qwen3.8 27B
-
-Qwen3.8 27B 是当前 SM75 验证主线。下表每一行均通过列出的项目内 profile，在物理双
-2080 Ti NVLink、TP=2、非 eager CUDA Graph 下启动。数据取三次独立 4K 输入、128 输出、
-不同 prompt 请求中的最高有效 prefill / decode；prefix cache 命中和质量探针失败的运行
-不计入。
-
-| Checkpoint | 已发布 profile（`PROFILE`、`MODE`） | 4K/128 prefill / decode tok/s |
-| --- | --- | ---: |
-| [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | `qwen3.8-27b/normal/fp8/fp16kv-128K-mtp3-text-only.env`、`normal` | 1496.95 / 83.90 |
-| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/normal/fp8/fp16kv-144K-nomtp-text-only.env`、`normal` | 1501.39 / 30.40 |
-| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/fast/fp8/tqk8v4-256K-mtp3-text-only.env`、`fast` | 1525.37 / 83.51 |
-| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/normal/fp8/fp16kv-104K-mtp3-text-image.env`、`normal` | 1506.86 / 82.88 |
-| Qwen/Qwen3.8-27B-FP8 | `qwen3.8-27b/fast/fp8/tqk8v4-240K-mtp3-text-image.env`、`fast` | 1355.04 / 73.48 |
-| [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | `qwen3.8-27b/normal/nvfp4/fp8kv-240K-nomtp-text-only.env`、`normal` | 1421.10 / 38.89 |
-| unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-only.env`、`fast` | 1411.91 / 102.60 |
-| unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/normal/nvfp4/fp8kv-240K-mtp3-text-image.env`、`normal` | 1266.09 / 55.69 |
-| unsloth/Qwen3.8-27B-NVFP4 | `qwen3.8-27b/fast/nvfp4/tqk8v4-240K-mtp3-text-image.env`、`fast` | 1276.92 / 83.99 |
-
-pre3 真并发 profile 是
-`qwen3.8-27b/normal/nvfp4/fp8kv-16K-nomtp-concurrent.env`。在同一组物理双
-2080 Ti、TP=2、无 MTP、非 eager CUDA Graph、关闭 prefix cache、严格
-4096 输入/128 输出条件下，并发 `1 / 2 / 4 / 8` 的完整窗口 aggregate decode 为
-`41.53 / 79.94 / 151.19 / 269.30 tok/s`。完整窗口从第一个请求首 token 算到
-最后一个请求完成；C8 是 C1 的 6.48 倍，首 token spread 为 1.447 ms。
-
-FP8 和 Unsloth NVFP4 纯文本路线都通过 `PROFILE_OK` 质量探针，且实测请求严格输出
-128/128。官方 FP8 路线使用 Marlin weight-only FP8 与 FP16 KV 或 TurboQuant K8V4；
-Unsloth checkpoint 使用 `compressed-tensors`、SM75 Marlin 的 NVFP4/FP8 线性层子集，
-并按表格使用 FP8 KV 或 TurboQuant K8V4。
-
-以下候选仅有短路线证据，属于**实验路线**，不是已提升的部署 profile：
-`pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB` 是不同的 ModelOpt 格式，使用其专属
-`qwen27b/experimental/nvfp4` profile；`RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP`
-使用 32K 的 `qwen27b/experimental/int8-w8a8` profile。它们不能继承正式 FP8/Unsloth
-路线的质量或容量结论。MXFP4 在 SM75 上仍不支持，因为上游未为该架构生成所需 Marlin
-kernel 变体。
-
-完整的 profile-first 证据矩阵见[测试征集](docs/0.2.1-pre-testing-call.zh-CN.md)，
-实际 graph mode、受控对比、回归测试和已知限制见[迁移验证报告](docs/2080ti-0.2.1-pre-validation.md)。
-
-### Qwen3.x 35B FP8
-
-35B FP8 路线保留自已验证的 `v0.1.x` 双 2080 Ti profile 集。它们仍可作为兼容
-参考，但在提升为 `0.2.1-pre3` 部署预设前必须独立完成 cu130 验证。
-
-保留的预设覆盖 FP16 KV 256K 纯文本 `normal` / `aggressive`、FP16 KV 136K
-图文 `normal` / `aggressive`，以及一条 178K `fast` MTP3 profile。
-
-### Gemma4 基础支持
-
-该树具备 Gemma4 的基础模型和运行时支持，但 Gemma4 不在当前 `0.2.1-pre3` 的
-SM75 发布验证集合中。checkpoint 类型、MTP 要求、KV cache 限制、多模态状态，
-以及历史证据与 cu130 证据的区别，均见
-[Gemma4 SM75 支持说明](docs/gemma4-sm75-support.zh-CN.md)。
+Launcher 支持选择 tensor parallel（`TP_SIZE`）和 pipeline parallel（`PP_SIZE`），
+当可见 GPU 数量与拓扑要求匹配时可以启动 TP/PP 混合推理。当前主要验证部署仍是双
+RTX 2080 Ti、TP=2、PP=1；其他并行布局可用于工程测试，但需要单独完成验证。
 
 ## 已测试模型权重
 
-这是刻意收窄后的 `0.2.x` checkpoint 清单。"已验证"表示列出的项目内 profile 已在物理
-双 2080 Ti NVLink 上完成；不代表该 checkpoint 的所有上下文、KV dtype 或 MTP 配置
-都已验证。35B 一行保留的是 `v0.1.x` 证据，明确不构成 cu130 的提升依据。
+当前模型和权重路线。具体服务预设和性能数据见
+[Profile 导引](profiles/README.zh-CN.md)。
 
-| 模型路线 | 权重路线 | 模型卡 | 状态 |
+| 模型路线 | 权重路线 | 模型卡 | 推荐场景 |
 | --- | --- | --- | --- |
-| Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | 已验证正式纯文本和图文 profile |
-| Qwen3.8 27B | NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | 已验证正式纯文本和图文 profile |
-| Qwen3.8 27B | NVFP4 | [pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB](https://huggingface.co/pottokao/Qwen3.8-27B-NVFP4-MTP-2x16GB) | 仅实验性 ModelOpt 短路线证据 |
-| Qwen3.8 27B | INT8 W8A8 | [RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP](https://huggingface.co/RukaRat/Qwen3.8-27B-INT8-W8A8-imatrix-MTP) | 仅实验性 32K 短路线证据 |
-| Qwen3.x 35B | FP8 | [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8)<br>[Jackrong/Qwopus3.6-35B-A3B-Coder-FP8](https://huggingface.co/Jackrong/Qwopus3.6-35B-A3B-Coder-FP8)<br>[kyr0/Ornith-35B-FP8-E4M3-MTP](https://huggingface.co/kyr0/Ornith-35B-FP8-E4M3-MTP) | `v0.1.x` 已验证；cu130 待复验 |
+| Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | 高精度单并发 |
+| Qwen3.8 27B | NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | 长上下文多并发 |
+| Qwen3.x 35B | FP8 | [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8) | 个人快速推理 |
 
 ## 构建与启动
-
-下载仓库后使用迁移构建入口：
 
 ```bash
 git clone https://github.com/weicj/vLLM-2080Ti-Definitive.git
@@ -143,42 +73,23 @@ git switch --track origin/vllm-2080ti-definitive-0.2.x
 ./build.sh
 ```
 
-`build.sh` 会创建 `.venv`、安装目标依赖、编译 CUDA 扩展，并把构建输出记录到
-`build-logs/`。目标编译器、kernel 或 CUDA 条件不满足时，它会明确失败。默认编译
-并发会根据主机 CPU 与内存自动选择；仅在确有需要时通过 `MAX_JOBS` 或
-`BUILD_MAX_JOBS` 显式覆写。
-
-构建成功后通过 launcher 启动并管理服务：
-
 ```bash
-./launcher.sh
-```
-
-交互式 launcher 可以选择 checkpoint、profile、模式、GPU/TP、端口、服务范围、
-chat template、reasoning 默认值和工具调用设置，并显示服务状态、PID、API URL、
-日志路径、prefix-cache 状态和已上报的 cache 容量。checkpoint 路径与 profile 分开
-选择；混合 GPU 主机上应先固定 `CUDA_DEVICE_ORDER=PCI_BUS_ID`，再选择物理
-2080 Ti 的 GPU ID。
-
-```bash
-CUDA_DEVICE_ORDER=PCI_BUS_ID \
 MODEL_DIR=/path/to/checkpoint \
-PROFILE=qwen3.8-27b/fast/fp8/tqk8v4-256K-mtp3-text-only.env \
+PROFILE=qwen27b/w8a16/fast/tqk8v4-256K-mtp3-text-only.env \
 MODE=fast GPU_DEVICES=4,5 TP_SIZE=2 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
 
-profile 只保存路线参数。容量与历史吞吐记录见
-[profiles/README.zh-CN.md](profiles/README.zh-CN.md)。修改路线后先运行
-`launcher.sh --print-config` 检查实际配置。
+使用 `./launcher.sh` 进入交互式配置，或使用 `./launcher.sh --print-config` 预览路线。
+可用 profile 见 [Profile 导引](profiles/README.zh-CN.md)。
 
 ## Profile 与推荐路线
 
 从 [Profile 导引](profiles/README.zh-CN.md) 开始选。Profile 按
-`profiles/<model>/<mode>/<weight>/<route>.env` 组织，例如
-`qwen3.8-27b/normal/fp8/fp16kv-128K-mtp3-text-only.env`、
-`qwen35b/aggressive/fp8/fp16kv-256K-nomtp-text-only.env` 和
-`qwen35b/normal/fp8/fp16kv-136K-nomtp-text-image.env`。
+`profiles/<model>/<weight>/<mode>/<route>.env` 组织，例如
+`qwen27b/w8a16/normal/fp16kv-128K-mtp3-text-only.env`、
+`qwen35b/w8a16/normal/fp16kv-256K-nomtp-text-only.env` 和
+`qwen35b/w8a16/normal/fp16kv-136K-nomtp-text-image.env`。
 
 可用模式：
 
@@ -199,6 +110,8 @@ FP16/default KV 追求输出质量，INT8 KV 用于平衡型长上下文服务�
 
 当前迁移请以[验证报告](docs/2080ti-0.2.1-pre-validation.md)中的精确方法和数据
 为准，尤其是 TurboQuant 与 MTP3。历史 profile 容量不是 cu130 证据。
+INT6/AutoRound checkpoint 需要 `humming-kernels[cu13]==0.1.13`，这是本分支锁定的版本；
+完整 Minachist 路线仍未验证。
 
 ## 目标硬件
 
