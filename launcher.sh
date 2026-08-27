@@ -1814,6 +1814,41 @@ detect_default_gpu_devices() {
   fi
 }
 
+normalize_gpu_devices_to_uuids() {
+  local devices=${1:-}
+  local part uuid normalized=""
+  local -a parts=()
+
+  devices=${devices// /}
+  IFS=',' read -r -a parts <<< "$devices"
+  for part in "${parts[@]}"; do
+    [[ -n "$part" ]] || continue
+    if [[ "$part" =~ ^[0-9]+$ ]]; then
+      uuid=$(
+        nvidia-smi --query-gpu=index,uuid --format=csv,noheader 2>/dev/null |
+          awk -F',' -v wanted_index="$part" '
+            {
+              gpu_index = $1
+              gpu_uuid = $2
+              gsub(/^[ \t]+|[ \t]+$/, "", gpu_index)
+              gsub(/^[ \t]+|[ \t]+$/, "", gpu_uuid)
+              if (gpu_index == wanted_index) {
+                print gpu_uuid
+                exit
+              }
+            }
+          '
+      ) || true
+      [[ -n "$uuid" ]] && part="$uuid"
+    fi
+    if [[ -n "$normalized" ]]; then
+      normalized+=","
+    fi
+    normalized+="$part"
+  done
+  printf '%s\n' "$normalized"
+}
+
 gpu_selected() {
   local idx=$1
   local devices=",${2// /},"
@@ -3256,7 +3291,12 @@ set_sm75_runtime_env() {
     export CUDAHOSTCXX="$CXX"
   fi
   export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-7.5}
-  export CUDA_VISIBLE_DEVICES="${GPU_DEVICES:-${CUDA_VISIBLE_DEVICES:-$(detect_default_gpu_devices)}}"
+  local selected_cuda_devices
+  selected_cuda_devices=$(
+    normalize_gpu_devices_to_uuids \
+      "${GPU_DEVICES:-${CUDA_VISIBLE_DEVICES:-$(detect_default_gpu_devices)}}"
+  )
+  export CUDA_VISIBLE_DEVICES="$selected_cuda_devices"
   export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}
   runtime_parent=$(cd -- "$RUNTIME_ROOT/.." && pwd)
   if [[ -z "${FLASHQLA_ROOT:-}" ]]; then
@@ -3273,6 +3313,7 @@ set_sm75_runtime_env() {
       fi
     done
   fi
+  export FLASHQLA_ROOT
   export PYTHONPATH="$RUNTIME_ROOT${FLASHQLA_ROOT:+:$FLASHQLA_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
   export PATH="$RUNTIME_ROOT/.venv/bin:${CUDA_HOME}/bin:$PATH"
   if [[ -n "${FLASHQLA_ROOT:-}" ]]; then
@@ -3425,15 +3466,8 @@ build_args() {
   fi
   [[ -n "${CHAT_TEMPLATE_FILE:-}" ]] && VLLM_ARGS+=(--chat-template "$CHAT_TEMPLATE_FILE")
 
-  local capture=$((MTP_K + 1))
-  # Capture the actual chunked-prefill budget as a piecewise graph too.  A
-  # decode-only list (the historical `[1]` below) leaves every 2048-token
-  # prefill eager, which is not comparable with SGLang's captured prefill
-  # path and adds avoidable Python/allocator overhead.
-  local prefill_capture=${MAX_BATCHED_TOKENS:-2048}
-  if (( prefill_capture < capture )); then
-    prefill_capture=$capture
-  fi
+  local decode_query_len=$((MTP_K + 1))
+  local decode_max_tokens=$((MAX_NUM_SEQS * decode_query_len))
   if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
     VLLM_ARGS+=(--speculative-config "$SPECULATIVE_CONFIG")
   elif (( MTP_K > 0 )); then
@@ -3466,9 +3500,27 @@ build_args() {
   if [[ -n "${COMPILATION_CONFIG_JSON:-}" ]]; then
     VLLM_ARGS+=(--compilation-config "$COMPILATION_CONFIG_JSON")
   elif [[ -n "${SPECULATIVE_CONFIG:-}" || "$MTP_K" -gt 0 ]]; then
-    VLLM_ARGS+=(--compilation-config "{\"cudagraph_mode\":\"${cudagraph_mode}\",\"cudagraph_capture_sizes\":[${capture},${prefill_capture}],\"max_cudagraph_capture_size\":${prefill_capture}}")
+    # Prefill stays on the piecewise compiled path.  Capturing the full
+    # max-num-batched-tokens budget as a CUDA graph adds a large graph and
+    # leaves long-prefill kernels to JIT during the first request.
+    local capture_sizes="${decode_query_len}"
+    local capture_size=$((decode_query_len * 2))
+    while (( capture_size <= decode_max_tokens )); do
+      capture_sizes+=",${capture_size}"
+      capture_size=$((capture_size * 2))
+    done
+    VLLM_ARGS+=(--compilation-config "{\"cudagraph_mode\":\"${cudagraph_mode}\",\"cudagraph_capture_sizes\":[${capture_sizes}],\"max_cudagraph_capture_size\":${decode_max_tokens}}")
   else
-    VLLM_ARGS+=(--compilation-config "{\"cudagraph_mode\":\"${cudagraph_mode}\",\"cudagraph_capture_sizes\":[1,${prefill_capture}],\"max_cudagraph_capture_size\":${prefill_capture}}")
+    # Keep a small decode graph ladder; chunked prefills remain non-eager via
+    # the piecewise compiled range and are not CUDA-graph captures.
+    local capture_sizes="1"
+    local capture_size=2
+    local capture_max=$((MAX_NUM_SEQS * 2))
+    while (( capture_size <= capture_max )); do
+      capture_sizes+=",${capture_size}"
+      capture_size=$((capture_size * 2))
+    done
+    VLLM_ARGS+=(--compilation-config "{\"cudagraph_mode\":\"${cudagraph_mode}\",\"cudagraph_capture_sizes\":[${capture_sizes}],\"max_cudagraph_capture_size\":${capture_max}}")
   fi
 }
 
@@ -3848,6 +3900,7 @@ launch_server() {
     echo "Profile: ${PROFILE:-manual}"
     echo "Mode: $MODE"
     echo "GPU devices: ${GPU_DEVICES:-}"
+    echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-}"
     echo "TP size: ${TP_SIZE:-}"
     echo "Port: $PORT"
     echo "Scope: $SERVICE_SCOPE"
@@ -4188,6 +4241,7 @@ Launch summary:
   vLLM --quantization:  ${QUANTIZATION:-auto}
   W/A type:             $(guess_precision_scheme "$MODEL_DIR" "${QUANTIZATION:-}")
   GPU devices:          ${GPU_DEVICES:-$(detect_default_gpu_devices)}
+  CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-auto}
   TP / PP:              ${TP_SIZE:-} / ${PP_SIZE:-1}
   KV precision:         ${KV_CACHE_DTYPE:-fp16}
   TQ diagnostics:       $(current_tq_diagnostics_label)
