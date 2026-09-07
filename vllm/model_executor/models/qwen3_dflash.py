@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
+import re
 from collections.abc import Iterable
 
 import torch
@@ -53,6 +54,39 @@ logger = init_logger(__name__)
 
 
 _SLIDING_ATTENTION = "sliding_attention"
+
+
+def _shift_dflash_quant_module_names(
+    module_names: list[str], layer_offset: int, num_draft_layers: int
+) -> list[str]:
+    """Align GPTQ module metadata with DFlash's global layer prefixes.
+
+    DFlash registers its draft layers after the target layers (for example,
+    ``model.layers.64``), while draft checkpoints store quantization metadata
+    using local names (``layers.0``).  The parameter tree remains local, so
+    only the names used when selecting a quantization method need shifting.
+    Checkpoints that already use global layer names are left unchanged.
+    """
+    if not module_names or layer_offset <= 0:
+        return module_names
+
+    layer_indices = []
+    for name in module_names:
+        match = re.search(r"(?:^|[.])layers[.]([0-9]+)(?:[.]|$)", name)
+        if match is not None:
+            layer_indices.append(int(match.group(1)))
+    if not layer_indices or max(layer_indices) >= num_draft_layers:
+        return module_names
+
+    def shift(name: str) -> str:
+        return re.sub(
+            r"((?:^|[.])layers[.])([0-9]+)(?=[.]|$)",
+            lambda match: f"{match.group(1)}{int(match.group(2)) + layer_offset}",
+            name,
+            count=1,
+        )
+
+    return [shift(name) for name in module_names]
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
@@ -349,6 +383,13 @@ class DFlashQwen3DecoderLayer(nn.Module):
 class DFlashQwen3Model(nn.Module):
     decoder_layer_cls = DFlashQwen3DecoderLayer
 
+    # GPTQ checkpoints store q/k/v and gate/up shards separately, while the
+    # DFlash modules use vLLM's fused QKV and gate-up linears.
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={"midlayer.": "layers.0."},
         orig_to_new_stacked={
@@ -371,6 +412,15 @@ class DFlashQwen3Model(nn.Module):
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
+        if self.quant_config is not None:
+            self.quant_config.packed_modules_mapping = self.packed_modules_mapping
+            self.quant_config.modules_in_block_to_quantize = (
+                _shift_dflash_quant_module_names(
+                    self.quant_config.modules_in_block_to_quantize,
+                    start_layer_id,
+                    self.config.num_hidden_layers,
+                )
+            )
 
         drafter_config = getattr(self.config, "eagle_config", {})
         drafter_config.update(getattr(self.config, "dflash_config", {}))
@@ -450,12 +500,19 @@ class DFlashQwen3Model(nn.Module):
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
         # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
-        kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-        self._fused_kv_weight = torch.cat(kv_weights, dim=0)
-        if has_bias:
-            kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
-            self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
+        # GPTQ/Marlin linears do not expose a dense ``weight`` parameter. Keep
+        # the fused path for dense checkpoints, and let _project_context_kv
+        # invoke the quantized qkv modules directly for quantized drafts.
+        if all(hasattr(a.qkv_proj, "weight") for a in layers_attn):
+            kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+            self._fused_kv_weight = torch.cat(kv_weights, dim=0)
+            if has_bias:
+                kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
+                self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
+            else:
+                self._fused_kv_bias = None
         else:
+            self._fused_kv_weight = None
             self._fused_kv_bias = None
 
         # K-norm weights stacked into one contiguous [num_layers, head_dim]
@@ -492,6 +549,7 @@ class DFlashQwen3Model(nn.Module):
         # Layer metadata
         self._num_attn_layers = len(layers_attn)
         self._kv_size = attn0.kv_size
+        self._kv_q_size = attn0.q_size
         self._head_dim = attn0.head_dim
         self._num_kv_heads = attn0.num_kv_heads
         self._rms_norm_eps = attn0.q_norm.variance_epsilon
@@ -506,6 +564,7 @@ class DFlashQwen3Model(nn.Module):
 
         # References to inner Attention layers for direct cache writes
         self._attn_layers = [layer.self_attn.attn for layer in self.layers]
+        self._qkv_projections = [layer.self_attn.qkv_proj for layer in self.layers]
 
     def _project_context_kv(
         self,
@@ -523,9 +582,25 @@ class DFlashQwen3Model(nn.Module):
             self._hidden_norm_weight,
             self._rms_norm_eps,
         )
-        all_kv_flat = F.linear(
-            normed_context_states, self._fused_kv_weight, self._fused_kv_bias
-        )
+        if self._fused_kv_weight is not None:
+            all_kv_flat = F.linear(
+                normed_context_states, self._fused_kv_weight, self._fused_kv_bias
+            )
+        else:
+            # Quantized qkv projections must stay in their Marlin kernel. The
+            # context precompute is outside the regular forward path, so run
+            # one projection per draft layer and stack only K/V outputs.
+            kv_parts = []
+            for qkv_proj in self._qkv_projections:
+                qkv, _ = qkv_proj(normed_context_states)
+                kv_parts.append(qkv[..., self._kv_q_size :])
+            all_kv_flat = torch.stack(kv_parts, dim=1)
+            all_kv = (
+                all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
+                .permute(2, 1, 0, 3, 4)
+                .contiguous()
+            )
+            return all_kv[0], all_kv[1]
         # Single contiguous copy that separates K/V and transposes to
         # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
         # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.

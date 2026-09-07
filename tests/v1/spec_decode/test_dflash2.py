@@ -6,9 +6,29 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.models.qwen3_dflash import (
+    _shift_dflash_quant_module_names,
+)
 from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
+
+
+def test_gptq_module_names_follow_dflash_global_layer_prefix():
+    names = [
+        "layers.0.self_attn.q_proj",
+        "layers.4.mlp.down_proj",
+        "layers.64.mlp.down_proj",
+    ]
+
+    # Mixed metadata with a global name is treated as already global. This
+    # avoids rewriting checkpoints that have already been exported for vLLM's
+    # global layer namespace.
+    assert _shift_dflash_quant_module_names(names, 64, 5) == names
+    assert _shift_dflash_quant_module_names(names[:2], 64, 5) == [
+        "layers.64.self_attn.q_proj",
+        "layers.68.mlp.down_proj",
+    ]
 
 
 @pytest.mark.parametrize("block_size", [5, 8])
