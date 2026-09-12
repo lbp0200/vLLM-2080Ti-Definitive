@@ -3343,6 +3343,15 @@ set_sm75_runtime_env() {
     export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-"$FLASHQLA_ROOT/.torch_extensions_vllm_flashqla_legacy"}
   fi
   export FLASHINFER_ENABLE_AOT=${FLASHINFER_ENABLE_AOT:-1}
+  if [[ "${QUANTIZATION:-}" == "exl3" ]]; then
+    # Qwen Flash-Next EXL3 keeps its PLE n-gram table on SSD.  The vLLM
+    # loader and ExLlamaV3 runtime must agree before workers are spawned.
+    export VLLM_EXL3_NGRAM_STREAM=${VLLM_EXL3_NGRAM_STREAM:-1}
+    export EXL3_NGRAM_STREAM=${EXL3_NGRAM_STREAM:-1}
+  fi
+  if [[ -n "${VLLM_PP_LAYER_PARTITION:-}" ]]; then
+    export VLLM_PP_LAYER_PARTITION
+  fi
   if [[ "${KV_CACHE_DTYPE:-}" == "int8_per_token_head" ]]; then
     export VLLM_INT8KV_FA_PREFILL=${VLLM_INT8KV_FA_PREFILL:-1}
     if [[ "$MODE" == "safe" ]]; then
