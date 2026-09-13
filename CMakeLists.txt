@@ -111,25 +111,8 @@ endif()
 #
 find_package(Torch REQUIRED)
 
-# Supported NVIDIA architectures.
-# This check must happen after find_package(Torch) because that's when CMAKE_CUDA_COMPILER_VERSION gets defined
-if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
-   CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.4)
-  # Rubin (10.7) can run SM100 family code, but CUDA 13.4 also supports
-  # targeting it directly.
-  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.7;11.0;12.0")
-elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
-   CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
-   # starting from CUDA 12.9 and Blackwell (10.0), we use family-specific targets (10.0f, 12.0f, etc)
-   # to support the whole generation without specifying all sub-architectures
-   # see: https://developer.nvidia.com/blog/nvidia-blackwell-and-nvidia-cuda-12-9-introduce-family-specific-architecture-features/
-  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0")
-elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
-   CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
-  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;10.3;12.0;12.1")
-else()
-  set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.7;8.9;9.0")
-endif()
+# This fork targets RTX 2080 Ti/Turing only.
+set(CUDA_SUPPORTED_ARCHS "7.5")
 
 #
 # spinloop extension (pure CXX; must stay above the non-CUDA device branch so
@@ -725,28 +708,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     CUDA_ARCHS "${CUDA_ARCHS}")
 
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
-  # moe marlin arches
-  # note that we always set `use_atomic_add=False` for moe marlin now,
-  # so we don't need 9.0 for bf16 atomicAdd PTX
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX;12.0f" "${CUDA_ARCHS}")
-  else()
-    cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX;12.0a;12.1a" "${CUDA_ARCHS}")
-  endif()
-  # moe marlin has limited support for turing
+  # This fork targets Turing only; retain the SM75 Marlin MoE kernels.
   cuda_archs_loose_intersection(MARLIN_MOE_SM75_ARCHS "7.5" "${CUDA_ARCHS}")
-  # moe marlin arches for fp8 input
-  # - sm80 doesn't support fp8 computation
-  # - sm90 and sm100 don't support QMMA.16832.F32.E4M3.E4M3 SAAS instruction
-  # so we only enable fp8 computation for SM89 (e.g. RTX 40x0)  and 12.0 (e.g. RTX 50x0)
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0f" "${CUDA_ARCHS}")
-  else()
-    cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0a;12.1a" "${CUDA_ARCHS}")
-  endif()
-  # moe marlin arches for other files
-  cuda_archs_loose_intersection(MARLIN_MOE_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
-  if (MARLIN_MOE_OTHER_ARCHS)
+  if (MARLIN_MOE_SM75_ARCHS)
 
     #
     # For the Marlin MOE kernels we automatically generate sources for various
@@ -755,8 +719,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set(MOE_MARLIN_GEN_SCRIPT
       ${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/moe/marlin_moe_wna16/generate_kernels.py)
     file(MD5 ${MOE_MARLIN_GEN_SCRIPT} MOE_MARLIN_GEN_SCRIPT_HASH)
-    list(JOIN CUDA_ARCHS "," CUDA_ARCHS_STR)
-    set(MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH "${MOE_MARLIN_GEN_SCRIPT_HASH}(ARCH:${CUDA_ARCHS_STR})")
+    list(JOIN MARLIN_MOE_SM75_ARCHS "," MARLIN_MOE_ARCHS_STR)
+    set(MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH "${MOE_MARLIN_GEN_SCRIPT_HASH}(ARCH:${MARLIN_MOE_ARCHS_STR})")
 
     message(STATUS "Marlin MOE generation script hash with arch: ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
     message(STATUS "Last run Marlin MOE generate script hash with arch: $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
@@ -766,7 +730,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env
         PYTHONPATH=$ENV{PYTHONPATH}
-          ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT} ${CUDA_ARCHS_STR}
+          ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT} ${MARLIN_MOE_ARCHS_STR}
         RESULT_VARIABLE moe_marlin_generation_result
         OUTPUT_VARIABLE moe_marlin_generation_output
         OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
@@ -787,53 +751,27 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       message(STATUS "Marlin MOE generation script has not changed, skipping generation.")
     endif()
 
-    if (MARLIN_MOE_ARCHS)
-      file(GLOB MARLIN_MOE_SRC "csrc/libtorch_stable/moe/marlin_moe_wna16/sm80_kernel_*.cu")
-      set_gencode_flags_for_srcs(
-        SRCS "${MARLIN_MOE_SRC}"
-        CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
-      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-        set_source_files_properties(${MARLIN_MOE_SRC}
-          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-      endif()
-      list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_SRC})
-    endif()
-
-    if (MARLIN_MOE_SM75_ARCHS)
-      file(GLOB MARLIN_MOE_SM75_SRC "csrc/libtorch_stable/moe/marlin_moe_wna16/sm75_kernel_*.cu")
-      set_gencode_flags_for_srcs(
-        SRCS "${MARLIN_MOE_SM75_SRC}"
-        CUDA_ARCHS "${MARLIN_MOE_SM75_ARCHS}")
-      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-        set_source_files_properties(${MARLIN_MOE_SM75_SRC}
-          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-      endif()
-      list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_SM75_SRC})
-    endif()
-
-    if (MARLIN_MOE_FP8_ARCHS)
-      file(GLOB MARLIN_MOE_FP8_SRC "csrc/libtorch_stable/moe/marlin_moe_wna16/sm89_kernel_*.cu")
-      set_gencode_flags_for_srcs(
-        SRCS "${MARLIN_MOE_FP8_SRC}"
-        CUDA_ARCHS "${MARLIN_MOE_FP8_ARCHS}")
-      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-        set_source_files_properties(${MARLIN_MOE_FP8_SRC}
-          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-      endif()
-      list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_FP8_SRC})
-    endif()
-
-    set(MARLIN_MOE_OTHER_SRC "csrc/libtorch_stable/moe/marlin_moe_wna16/ops.cu")
+    file(GLOB MARLIN_MOE_SM75_SRC "csrc/libtorch_stable/moe/marlin_moe_wna16/sm75_kernel_*.cu")
     set_gencode_flags_for_srcs(
-      SRCS "${MARLIN_MOE_OTHER_SRC}"
-      CUDA_ARCHS "${MARLIN_MOE_OTHER_ARCHS}")
+      SRCS "${MARLIN_MOE_SM75_SRC}"
+      CUDA_ARCHS "${MARLIN_MOE_SM75_ARCHS}")
     if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-      set_source_files_properties(${MARLIN_MOE_OTHER_SRC}
+      set_source_files_properties(${MARLIN_MOE_SM75_SRC}
         PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
     endif()
-    list(APPEND VLLM_MOE_EXT_SRC "${MARLIN_MOE_OTHER_SRC}")
+    list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_SM75_SRC})
 
-    message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_OTHER_ARCHS}")
+    set(MARLIN_MOE_SM75_OPS_SRC "csrc/libtorch_stable/moe/marlin_moe_wna16/ops.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${MARLIN_MOE_SM75_OPS_SRC}"
+      CUDA_ARCHS "${MARLIN_MOE_SM75_ARCHS}")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+      set_source_files_properties(${MARLIN_MOE_SM75_OPS_SRC}
+        PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+    endif()
+    list(APPEND VLLM_MOE_EXT_SRC "${MARLIN_MOE_SM75_OPS_SRC}")
+
+    message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_SM75_ARCHS}")
   else()
     message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
                    " in CUDA target architectures")

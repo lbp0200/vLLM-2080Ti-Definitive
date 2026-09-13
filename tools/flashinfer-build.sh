@@ -24,19 +24,8 @@ git clone --depth 1 --recursive --shallow-submodules \
     --branch "${FLASHINFER_GIT_REF}" \
     ${FLASHINFER_GIT_REPO} flashinfer
 
-# Set CUDA arch list based on CUDA version
-# Exclude CUDA arches for older versions (11.x and 12.0-12.7)
-if [[ "${CUDA_VERSION}" == 11.* ]]; then
-    FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
-elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
-    FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
-elif [[ "${CUDA_VERSION}" == 12.[8-9]* ]]; then
-    # CUDA 12.8–12.9
-    FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 10.3a 12.0"
-else
-    # CUDA 13.0+
-    FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0f 11.0 12.0f"
-fi
+# This fork ships FlashInfer AOT kernels for RTX 2080 Ti/Turing only.
+FI_TORCH_CUDA_ARCH_LIST="7.5"
 
 echo "🏗️ Building FlashInfer AOT for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
 
