@@ -3163,9 +3163,10 @@ def init_custom_ar(
     rank_data: torch.Tensor,
     rank: int,
     fully_connected: bool,
+    same_node: bool,
 ) -> int:
     return torch.ops._C_custom_ar.init_custom_ar(
-        ipc_tensors, rank_data, rank, fully_connected
+        ipc_tensors, rank_data, rank, fully_connected, same_node
     )
 
 
