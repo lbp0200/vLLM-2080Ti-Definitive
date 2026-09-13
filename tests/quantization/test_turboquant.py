@@ -991,3 +991,137 @@ class TestStoreDecodeRoundTrip:
             assert cos_sim > threshold, (
                 f"Preset {preset} head {h}: cosine_sim={cos_sim:.4f} < {threshold}"
             )
+
+
+@pytest.mark.skipif(not GPGPU_AVAILABLE, reason="GPGPU not available")
+class TestSpecContinuationMerge:
+    """Numerical regression for raw-KV speculative continuation merge."""
+
+    @pytest.mark.parametrize("empty_prefix", [False, True])
+    def test_matches_fp32_causal_reference(self, empty_prefix):
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_spec_continuation_merge,
+        )
+
+        device = torch.device(DEVICE_TYPE)
+        chunk_len = 8
+        num_kv_heads = 2
+        num_query_heads = 4
+        head_dim = 128
+        scale = 1.0 / math.sqrt(head_dim)
+        torch.manual_seed(20260913)
+        query = torch.randn(
+            chunk_len, num_query_heads, head_dim, device=device, dtype=torch.float16
+        )
+        key = torch.randn(
+            chunk_len, num_kv_heads, head_dim, device=device, dtype=torch.float16
+        )
+        value = torch.randn_like(key)
+        prefix_out = torch.randn_like(query)
+        prefix_lse = torch.randn(
+            chunk_len, num_query_heads, device=device, dtype=torch.float32
+        )
+        if empty_prefix:
+            prefix_out.zero_()
+            prefix_lse.fill_(float("-inf"))
+
+        result = triton_turboquant_spec_continuation_merge(
+            query, key, value, prefix_out, prefix_lse, scale
+        )
+
+        kv_group_size = num_query_heads // num_kv_heads
+        scores = (
+            torch.einsum(
+                "thgd,shd->thgs",
+                query.float().view(
+                    chunk_len, num_kv_heads, kv_group_size, head_dim
+                ),
+                key.float(),
+            )
+            * scale
+        )
+        token_idx = torch.arange(chunk_len, device=device)
+        causal = token_idx[:, None] >= token_idx[None, :]
+        scores = scores.masked_fill(~causal[:, None, None, :], float("-inf"))
+        current_lse = torch.logsumexp(scores, dim=-1).reshape(
+            chunk_len, num_query_heads
+        )
+        current_out = torch.einsum(
+            "thgs,shd->thgd", torch.softmax(scores, dim=-1), value.float()
+        ).reshape(chunk_len, num_query_heads, head_dim)
+        merged_lse = torch.logaddexp(prefix_lse, current_lse)
+        expected = (
+            prefix_out.float() * torch.exp(prefix_lse - merged_lse).unsqueeze(-1)
+            + current_out * torch.exp(current_lse - merged_lse).unsqueeze(-1)
+        ).to(torch.float16)
+
+        torch.testing.assert_close(result, expected, rtol=2e-3, atol=2e-3)
+
+        aliased_prefix_out = prefix_out.clone()
+        aliased = triton_turboquant_spec_continuation_merge(
+            query,
+            key,
+            value,
+            aliased_prefix_out,
+            prefix_lse,
+            scale,
+            output=aliased_prefix_out,
+        )
+        assert aliased.data_ptr() == aliased_prefix_out.data_ptr()
+        torch.testing.assert_close(aliased, expected, rtol=2e-3, atol=2e-3)
+
+
+class TestSpecDecodeGraphRoute:
+    def test_uses_raw_current_kv_and_clamps_capture_prefix(self, monkeypatch):
+        """The graph route must not reread verifier rows from the TQ cache."""
+        from vllm.v1.attention.backends import turboquant_attn
+
+        impl = object.__new__(turboquant_attn.TurboQuantAttentionImpl)
+        captured = []
+
+        def fake_raw_current(
+            query,
+            key,
+            value,
+            kv_cache,
+            block_table,
+            cached_len,
+            Pi,
+            centroids,
+            PiT,
+            arange_cache,
+        ):
+            captured.append((key.clone(), value.clone(), cached_len.clone()))
+            return query + key + value
+
+        monkeypatch.setattr(
+            impl, "_spec_continuation_decode_attention", fake_raw_current
+        )
+
+        query = torch.ones(8, 2, 4, dtype=torch.float16)
+        key = torch.full_like(query, 2)
+        value = torch.full_like(query, 3)
+        metadata = SimpleNamespace(
+            query_start_loc_cpu=torch.tensor([0, 8]),
+            query_start_loc=torch.tensor([0, 8]),
+            seq_lens=torch.tensor([4104]),
+            max_seq_len=4104,
+            max_query_len=8,
+            block_table=torch.zeros(1, 1, dtype=torch.int32),
+        )
+
+        result = impl._spec_decode_attention(
+            query, key, value, object(), metadata, None, None, None
+        )
+
+        assert len(captured) == 1
+        torch.testing.assert_close(captured[0][0], key)
+        torch.testing.assert_close(captured[0][1], value)
+        assert captured[0][2].tolist() == [4096]
+        torch.testing.assert_close(result, query + key + value)
+
+        metadata.seq_lens.fill_(1)
+        impl._spec_decode_attention(
+            query, key, value, object(), metadata, None, None, None
+        )
+        assert captured[1][2].tolist() == [0]

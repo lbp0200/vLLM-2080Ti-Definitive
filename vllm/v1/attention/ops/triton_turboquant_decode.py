@@ -45,6 +45,10 @@ def _read_decode_block_kv() -> int:
 
 _DECODE_BLOCK_KV = _read_decode_block_kv()
 
+# Keep this independent from the backend policy constant: this low-level
+# helper has no backend import and is also exercised directly by GPU tests.
+_SPEC_CONTINUATION_MAX_TOKENS = 128
+
 _FP8_FORMAT_CODE: dict[int, int] = {}
 _FP8_FORMAT_OVERRIDE = os.getenv(
     "VLLM_TURBOQUANT_K8V4_FP8_FORMAT", "auto"
@@ -515,6 +519,213 @@ def _tq_full_dequant_kv(
 # ---------------------------------------------------------------------------
 # Stage 2: Reuse from triton_decode_attention.py
 # ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _tq_spec_continuation_merge_kernel(
+    # Raw continuation chunk.
+    Q_ptr,  # [T, Hq, D]
+    K_ptr,  # [T, Hk, D]
+    V_ptr,  # [T, Hk, D]
+    # Attention state over the compressed, committed prefix.
+    Prefix_out_ptr,  # [T, Hq, D]
+    Prefix_lse_ptr,  # [T, Hq]
+    # Final prefix + raw-continuation attention state.
+    Out_ptr,  # [T, Hq, D]
+    stride_qt,
+    stride_qh,
+    stride_qd,
+    stride_kt,
+    stride_kh,
+    stride_kd,
+    stride_vt,
+    stride_vh,
+    stride_vd,
+    stride_pot,
+    stride_poh,
+    stride_pod,
+    stride_plt,
+    stride_plh,
+    stride_ot,
+    stride_oh,
+    stride_od,
+    ATTN_SCALE: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    KV_GROUP_SIZE: tl.constexpr,
+    CHUNK_LEN: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    """Merge compressed-prefix attention and causal raw current KV.
+
+    One program owns one query row and one query head. Current KV is processed
+    in small time tiles using online softmax, which keeps the register
+    footprint bounded for ordinary continuation prefill and short verifier
+    chunks.
+    """
+    row = tl.program_id(0)
+    q_head = tl.program_id(1)
+    kv_head = q_head // KV_GROUP_SIZE
+
+    d_offs = tl.arange(0, BLOCK_D)
+    d_mask = d_offs < HEAD_DIM
+    q = tl.load(
+        Q_ptr + row * stride_qt + q_head * stride_qh + d_offs * stride_qd,
+        mask=d_mask,
+        other=0.0,
+    ).to(tl.float32)
+
+    # Online softmax state for raw causal attention over s <= row.
+    current_max = -float("inf")
+    current_sum = 0.0
+    current_acc = tl.zeros([BLOCK_D], dtype=tl.float32)
+    token_offsets = tl.arange(0, BLOCK_T)
+
+    for start in range(0, CHUNK_LEN, BLOCK_T):
+        token_idx = start + token_offsets
+        token_mask = (token_idx < CHUNK_LEN) & (token_idx <= row)
+        kv_offsets = (
+            token_idx[:, None] * stride_kt
+            + kv_head * stride_kh
+            + d_offs[None, :] * stride_kd
+        )
+        key = tl.load(
+            K_ptr + kv_offsets,
+            mask=token_mask[:, None] & d_mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        scores = tl.sum(key * q[None, :], axis=1) * ATTN_SCALE
+        scores = tl.where(token_mask, scores, -float("inf"))
+
+        tile_max = tl.max(scores, axis=0)
+        next_max = tl.maximum(current_max, tile_max)
+        current_scale = tl.exp(current_max - next_max)
+        weights = tl.exp(scores - next_max)
+        current_sum = current_sum * current_scale + tl.sum(weights, axis=0)
+
+        value_offsets = (
+            token_idx[:, None] * stride_vt
+            + kv_head * stride_vh
+            + d_offs[None, :] * stride_vd
+        )
+        value = tl.load(
+            V_ptr + value_offsets,
+            mask=token_mask[:, None] & d_mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        current_acc = current_acc * current_scale + tl.sum(
+            value * weights[:, None], axis=0
+        )
+        current_max = next_max
+
+    current_lse = current_max + tl.log(current_sum)
+    current_out = current_acc / current_sum
+
+    prefix_lse = tl.load(Prefix_lse_ptr + row * stride_plt + q_head * stride_plh).to(
+        tl.float32
+    )
+    prefix_out = tl.load(
+        Prefix_out_ptr + row * stride_pot + q_head * stride_poh + d_offs * stride_pod,
+        mask=d_mask,
+        other=0.0,
+    ).to(tl.float32)
+
+    merged_max = tl.maximum(prefix_lse, current_lse)
+    prefix_weight = tl.exp(prefix_lse - merged_max)
+    current_weight = tl.exp(current_lse - merged_max)
+    denom = prefix_weight + current_weight
+    output = (prefix_out * prefix_weight + current_out * current_weight) / denom
+    tl.store(
+        Out_ptr + row * stride_ot + q_head * stride_oh + d_offs * stride_od,
+        output,
+        mask=d_mask,
+    )
+
+
+def triton_turboquant_spec_continuation_merge(
+    query: torch.Tensor,
+    key_chunk: torch.Tensor,
+    value_chunk: torch.Tensor,
+    prefix_out: torch.Tensor,
+    prefix_lse: torch.Tensor,
+    scale: float,
+    output: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Merge TQ prefix attention with exact causal current-chunk attention.
+
+    ``do_kv_cache_update`` stores a speculative verifier's complete current
+    chunk before its attention call. The compressed cache is intentionally
+    lossy, so rereading those just-written rows can alter verifier logits. This
+    helper keeps the committed prefix in TurboQuant and consumes only the
+    current chunk from raw K/V. It is graph-safe and uses FP32 softmax state.
+
+    When ``output`` aliases ``prefix_out`` the input buffer is overwritten
+    after it has been read by each independent program. The backend uses that
+    form to avoid another graph-captured allocation.
+    """
+    if query.ndim != 3 or key_chunk.ndim != 3 or value_chunk.ndim != 3:
+        raise ValueError("TQ continuation tensors must have shape [T, H, D].")
+    chunk_len, num_query_heads, head_dim = query.shape
+    if (
+        chunk_len <= 0
+        or key_chunk.shape != value_chunk.shape
+        or key_chunk.shape[0] != chunk_len
+        or key_chunk.shape[2] != head_dim
+        or num_query_heads % key_chunk.shape[1] != 0
+    ):
+        raise ValueError("Invalid TQ speculative-continuation tensor shapes.")
+    if prefix_out.shape != query.shape or prefix_lse.shape != query.shape[:2]:
+        raise ValueError("TQ prefix attention state has incompatible shape.")
+    if chunk_len > _SPEC_CONTINUATION_MAX_TOKENS:
+        raise ValueError(
+            "TQ speculative-continuation merge supports chunks up to "
+            f"{_SPEC_CONTINUATION_MAX_TOKENS} tokens."
+        )
+
+    if output is None:
+        output = torch.empty_like(query)
+    if output.shape != query.shape or output.dtype != query.dtype:
+        raise ValueError("TQ continuation output has incompatible shape or dtype.")
+
+    # A bounded raw-KV tile avoids the excessive register footprint of a
+    # [128, D] materialization while still specializing the common T=8 case.
+    block_t = min(16, triton.next_power_of_2(chunk_len))
+    block_d = triton.next_power_of_2(head_dim)
+    grid = (chunk_len, num_query_heads)
+    _tq_spec_continuation_merge_kernel[grid](
+        query,
+        key_chunk,
+        value_chunk,
+        prefix_out,
+        prefix_lse,
+        output,
+        query.stride(0),
+        query.stride(1),
+        query.stride(2),
+        key_chunk.stride(0),
+        key_chunk.stride(1),
+        key_chunk.stride(2),
+        value_chunk.stride(0),
+        value_chunk.stride(1),
+        value_chunk.stride(2),
+        prefix_out.stride(0),
+        prefix_out.stride(1),
+        prefix_out.stride(2),
+        prefix_lse.stride(0),
+        prefix_lse.stride(1),
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
+        ATTN_SCALE=scale,
+        HEAD_DIM=head_dim,
+        KV_GROUP_SIZE=num_query_heads // key_chunk.shape[1],
+        CHUNK_LEN=chunk_len,
+        BLOCK_T=block_t,
+        BLOCK_D=block_d,
+        num_warps=4,
+        num_stages=1,
+    )
+    return output
 
 # ---------------------------------------------------------------------------
 # Launcher — cached constants + fused GEMM

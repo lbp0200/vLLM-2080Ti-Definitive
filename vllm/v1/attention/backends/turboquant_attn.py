@@ -56,9 +56,10 @@ from vllm.v1.attention.backends.fa_utils import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.ops.triton_turboquant_decode import (
-    _tq_full_dequant_kv,
     _fp8_format_code,
+    _tq_full_dequant_kv,
     triton_turboquant_decode_attention,
+    triton_turboquant_spec_continuation_merge,
 )
 from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -1116,8 +1117,10 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         num_decode_tokens = attn_metadata.num_decode_tokens
 
         if attn_metadata.force_spec_decode:
+            k = key[:N].view(N, self.num_kv_heads, self.head_size)
+            v = value[:N].view(N, self.num_kv_heads, self.head_size)
             attn_out = self._spec_decode_attention(
-                q, kv_cache, attn_metadata, Pi, centroids, PiT
+                q, k, v, kv_cache, attn_metadata, Pi, centroids, PiT
             )
         elif not attn_metadata.is_prefill:
             # Pure decode batch — fast path
@@ -1144,8 +1147,10 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             # prefill tail even though its query length is greater than one.
             # Each query needs an incrementing sequence length for causal
             # attention, so it cannot use the regular decode path directly.
+            k = key[:N].view(N, self.num_kv_heads, self.head_size)
+            v = value[:N].view(N, self.num_kv_heads, self.head_size)
             attn_out = self._spec_decode_attention(
-                q, kv_cache, attn_metadata, Pi, centroids, PiT
+                q, k, v, kv_cache, attn_metadata, Pi, centroids, PiT
             )
         else:
             # Mixed batch: decodes first (guaranteed by reorder_batch).
@@ -1275,6 +1280,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
     def _spec_decode_attention(
         self,
         query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: TurboQuantMetadata,
         Pi: torch.Tensor,
@@ -1283,13 +1290,12 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
     ) -> torch.Tensor:
         """Run a multi-token speculative continuation as causal decodes.
 
-        This is the full CUDA-Graph route used by the SM75 fast profile. The
-        candidate K/V entries have already been written to the TurboQuant
-        cache, so one B=q_len compressed-cache launch preserves the historical
-        B=4 graph topology and its fused stage-2 reduction. The raw-K/V prefix
-        merge path is intentionally kept out of this route: on SM75 its
-        materialized B=4 page-table variant is not graph-safe and regresses the
-        validated ~100 tok/s path.
+        The cache update precedes attention. The just-written verifier chunk is
+        lossy in TurboQuant, so this graph path attends to the committed prefix
+        from TQ and to the current B-token verifier chunk from raw K/V. Capture
+        has a one-token synthetic sequence length; clamp its derived prefix to
+        zero so no sentinel cache page is read. Replay receives the real prefix
+        length from the graph input metadata.
         """
         qsl_cpu = attn_metadata.query_start_loc_cpu
         qsl = (
@@ -1317,33 +1323,30 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             if q_len <= 0:
                 continue
 
-            rel_seq_lens = arange_cache[1 : q_len + 1]
-            seq_lens = (
-                attn_metadata.seq_lens[request_idx : request_idx + 1]
-                - q_len
-                + rel_seq_lens
-            ).contiguous()
-            block_table = (
-                attn_metadata.block_table[request_idx : request_idx + 1]
-                .expand(q_len, -1)
-                .contiguous()
+            q_seq = query[q_start:q_end]
+            k_seq = key[q_start:q_end]
+            v_seq = value[q_start:q_end]
+            cached_len = (
+                attn_metadata.seq_lens[request_idx : request_idx + 1] - q_len
+            ).clamp_min(0)
+            out = self._spec_continuation_decode_attention(
+                q_seq,
+                k_seq,
+                v_seq,
+                kv_cache,
+                attn_metadata.block_table[request_idx : request_idx + 1],
+                cached_len,
+                Pi,
+                centroids,
+                PiT,
+                arange_cache,
             )
-            output[q_start:q_end] = triton_turboquant_decode_attention(
-                query=query[q_start:q_end],
-                kv_cache=kv_cache,
-                block_table=block_table,
-                seq_lens=seq_lens,
-                Pi=Pi,
-                centroids=centroids,
-                scale=self.scale,
-                mse_bits=self.tq_config.key_mse_bits,
-                key_packed_size=self.tq_config.key_packed_size,
-                value_quant_bits=self.tq_config.effective_value_quant_bits,
-                key_fp8=self.tq_config.key_fp8,
-                norm_correction=self.tq_config.norm_correction,
-                PiT=PiT,
-                max_num_kv_splits=self.max_num_kv_splits,
-            ).to(query.dtype)
+            if out is None:
+                raise RuntimeError(
+                    "TurboQuant speculative decode could not construct the "
+                    "raw-current verifier attention path."
+                )
+            output[q_start:q_end] = out.to(query.dtype)
 
         return output
 
@@ -1619,9 +1622,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         """Merge compressed-prefix attention with raw MTP continuation KV.
 
         The cache update runs before attention, so reading the current
-        speculative tokens from the quantized cache is lossy.  Computing the
-        prefix once with the TQ kernel and the tiny current chunk with PyTorch
-        preserves MTP quality without falling back to full prefix dequant.
+        speculative tokens from the quantized cache is lossy. Computing the
+        prefix once with the TQ kernel and the raw current chunk with an
+        online-softmax merge preserves MTP quality without full prefix dequant.
         """
         if isinstance(cached_len, int) and cached_len <= 0:
             return None
@@ -1709,26 +1712,18 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 torch.full_like(prefix_lse, float("-inf")),
             )
 
-        kv_group_size = Hq // Hk
-        q_float = query.float().view(q_len, Hk, kv_group_size, D)
-        k_float = key_chunk.float()
-        v_float = value_chunk.float()
-        scores = torch.einsum("thgd,shd->thgs", q_float, k_float) * self.scale
-        idx = torch.arange(q_len, device=query.device)
-        causal = idx.view(q_len, 1, 1, 1) >= idx.view(1, 1, 1, q_len)
-        scores = scores.masked_fill(~causal, float("-inf"))
-        current_lse = torch.logsumexp(scores, dim=-1).reshape(q_len, Hq)
-        probs = torch.softmax(scores, dim=-1)
-        current_out = torch.einsum("thgs,shd->thgd", probs, v_float)
-        current_out = current_out.reshape(q_len, Hq, D)
-
-        combined_lse = torch.logaddexp(prefix_lse, current_lse)
-        prefix_weight = torch.exp(prefix_lse - combined_lse).unsqueeze(-1)
-        current_weight = torch.exp(current_lse - combined_lse).unsqueeze(-1)
-        return (
-            prefix_out.float() * prefix_weight
-            + current_out.float() * current_weight
-        ).to(query.dtype)
+        return triton_turboquant_spec_continuation_merge(
+            query,
+            key_chunk,
+            value_chunk,
+            prefix_out,
+            prefix_lse,
+            self.scale,
+            # The prefix state has been consumed by every program when its
+            # matching output row is written, so it doubles as the final
+            # output buffer without an additional graph-captured allocation.
+            output=prefix_out,
+        )
 
     def _continuation_prefill(
         self,
