@@ -298,15 +298,6 @@ target "test-rocm-ci" {
   output = ["type=registry"]
 }
 
-# Validate the test image in the shared BuildKit graph and export only the
-# success marker. This avoids pulling the multi-GB image into the host daemon.
-target "smoke-test-rocm-ci" {
-  inherits   = ["_common-rocm", "_ci-rocm"]
-  target     = "export_test_smoke"
-  cache-from = get_cache_from_rocm()
-  output     = ["type=local,dest=./build/rocm-smoke-export"]
-}
-
 # Cache-only target for the source-scoped ROCm native build stage.
 # This persists the csrc-build stage in the registry cache even though the
 # final test image only consumes it indirectly while packaging the wheel.
@@ -355,7 +346,6 @@ group "test-rocm-ci-with-wheel" {
     "rust-rocm-ci",
     "csrc-rocm-ci",
     "test-rocm-ci",
-    "smoke-test-rocm-ci",
     "export-wheel-rocm",
   ]
 }

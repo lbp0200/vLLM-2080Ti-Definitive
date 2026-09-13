@@ -547,7 +547,7 @@ An attacker sharing the same backend can measure differences in Time to First To
 
 ### Cache Salting
 
-vLLM accepts an optional `cache_salt` parameter on requests. The salt is mixed into the hash of the first KV cache block, so only requests carrying the same salt can share cached prefix blocks. See [Automatic Prefix Caching](../design/prefix_caching.md) for the implementation details.
+vLLM accepts an optional `cache_salt` parameter on requests. The salt is mixed into the hash of the first KV cache block, so only requests carrying the same salt can share cached prefix blocks. See the upstream [Automatic Prefix Caching](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching/) documentation for implementation details.
 
 `cache_salt` is accepted by the OpenAI-compatible chat completions, completions, responses, and pooling (embeddings, classification, scoring) endpoints, and by the Anthropic `/v1/messages` endpoint.
 
