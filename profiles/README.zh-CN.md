@@ -28,12 +28,12 @@ profiles/
 
 ## Profile 与参考性能
 
-<small>参考环境：`.31`，双路 Intel Xeon E5-2673 v4（40 核 / 80 线程）、60 GiB
+<small>pre3 历史参考环境：`.31`，双路 Intel Xeon E5-2673 v4（40 核 / 80 线程）、60 GiB
 内存 + 8 GiB swap，双 RTX 2080 Ti 22 GiB、NVLink（SM75），Ubuntu 26.04、kernel
 7.0.0-30、驱动 595.84、CUDA 13.0、PyTorch 2.13、vLLM 0.27.1、TP=2/PP=1，启用
 CUDA Graph 且未启用 eager。性能统一按 4K 输入 / 128 输出，表示 prefill / decode
-tok/s。</small> `-` 表示没有稳定测量值。详细证据见
-[`docs/2080ti-0.2.1-pre-validation.md`](../docs/2080ti-0.2.1-pre-validation.md)。
+tok/s。这些数据不能验证采用 upstream nightly `b23433088b` 的 pre4。</small> `-` 表示没有稳定测量值。详细证据见
+[历史验证记录](../docs/2080ti-0.2.1-pre-validation.md)。
 
 ### [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8)
 

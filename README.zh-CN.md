@@ -3,7 +3,7 @@
 
 ![vLLM 2080 Ti Definitive Edition 题图](docs/assets/vllm-2080ti-cover.jpg)
 
-面向双 RTX 2080 Ti 22 GB / SM75 推理的硬件定向 vLLM fork。本分支是 `vllm-2080ti-definitive-0.2.x` 维护线：基于上游 vLLM `v0.27.1`、CUDA 13.0 和 PyTorch 2.13 的公开 `0.2.x` 预发布线。它不是稳定生产默认版本；持续维护的 `0.1.x` 线仍是项目当前的稳定发布主线，对应 CUDA 12.8 与 PyTorch 2.11。
+面向双 RTX 2080 Ti 22 GB / SM75 推理的硬件定向 vLLM fork。本分支是 `vllm-2080ti-definitive-0.2.x` 维护线：基于上游 vLLM nightly [`b23433088b`](https://github.com/vllm-project/vllm/commit/b23433088bf29980d20dff1bd64c753dd8883506)（`v0.29.1rc0-33`）、CUDA 13.0 和 PyTorch 2.13 的公开 `0.2.x` 预发布线。它不是稳定生产默认版本；持续维护的 `0.1.x` 线仍是项目当前的稳定发布主线，对应 CUDA 12.8 与 PyTorch 2.11。
 
 项目保留复现双 2080 Ti TP=2 栈所需的 SM75 专用源码修改、launcher profile 和
 测试证据。它基于上游 vLLM；再发布派生版本时必须保留上游许可证、上游署名以及
@@ -13,12 +13,12 @@
 
 ![单请求实时测速演示](docs/assets/vllmspeed.gif)
 
-Fork 版本：`0.2.1-pre3`
-基础 vLLM：`0.27.1`
+Fork 版本：`0.2.1-pre4`
+基础 vLLM：nightly `b23433088b`（`v0.29.1rc0-33`）
 
 分支：[`vllm-2080ti-definitive-0.2.x`](https://github.com/weicj/vLLM-2080Ti-Definitive/tree/vllm-2080ti-definitive-0.2.x)
-预发布快照：[v0.2.1-pre3](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.1-pre3)
-相比 pre2 的变化：[CHANGELOG.md](CHANGELOG.md)
+预发布快照：[v0.2.1-pre4](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.1-pre4)
+相比 pre3 的变化：[CHANGELOG.md](CHANGELOG.md)
 
 ## 为什么用 RTX 2080 Ti 做 LLM 推理？
 
@@ -43,9 +43,11 @@ Graph，把这些硬件资源转成可用的 serving 栈。
 `0.2.x` 的目标环境是 Ubuntu 26.04 及以上、Linux kernel 7 及以上、GCC/G++ 15、CUDA 13.0 与 PyTorch 2.13。持续维护的 `0.1.x` 线仍是 CUDA 12.8、PyTorch 2.11、较早 kernel 以及 GCC 12/13/14 的兼容路线。
 
 双 2080 Ti 的 CUDA Graph 验证记录在
-[迁移验证报告](docs/2080ti-0.2.1-pre-validation.md)：其中包含实际显卡选择规则、
-构建门槛、正确性回归以及 4K/128 测试口径。仅能加载的 checkpoint 不应被视为
-已提升为部署路线。
+[迁移验证报告](docs/2080ti-0.2.1-pre-validation.md)：其中 pre3 数据包含实际显卡选择规则、
+构建门槛、正确性回归以及 4K/128 测试口径，但不能直接验证 pre4。仅能加载的
+checkpoint 不应被视为已提升为部署路线。
+
+pre4 是 nightly 集成候选，必须重新运行文档中的 SM75 目标路线后才可晋升为部署构建。
 
 此前已合并 SM75 PR 的迁移判断见 [0.2.x PR 迁移审计](docs/0.2.x-pr-migration-audit.md)。
 
@@ -117,7 +119,7 @@ INT6/AutoRound checkpoint 需要 `humming-kernels[cu13]==0.1.13`，这是本分�
 
 - 两张经 NVLink 连接的 RTX 2080 Ti 22 GB
 - NVIDIA Turing / SM75，tensor parallel size 2
-- `0.2.1-pre3` 目标：CUDA 13.0、PyTorch 2.13、Python 3.12
+- `0.2.1-pre4` 目标：CUDA 13.0、PyTorch 2.13、Python 3.12
 - 目标主机：Ubuntu 26.04 及以上、Linux kernel 7 及以上、GCC/G++ 15
 
 其它 Turing 显卡仍需针对显存容量、PCIe/NVLink 拓扑、模型 head dimension、
@@ -143,7 +145,7 @@ KV cache dtype 和 CUDA Graph 行为独立验证。
 
 **应该使用哪些 CUDA 和 PyTorch 版本？**
 
-`0.2.1-pre3` 目标是 CUDA 13.0 + PyTorch 2.13。旧的 CUDA 12.8 + PyTorch 2.11
+`0.2.1-pre4` 目标是 CUDA 13.0 + PyTorch 2.13。旧的 CUDA 12.8 + PyTorch 2.11
 仍作为独立的 `v0.1.x` 兼容路线维护。PyTorch CUDA 构建、toolkit、FlashInfer/
 FlashQLA 构建和启动 profile 必须保持一致，不能混用运行时假设。
 

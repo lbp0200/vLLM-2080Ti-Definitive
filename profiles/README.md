@@ -30,12 +30,13 @@ MTP3. The message type is explicit in every shipped profile as
 
 ## Profile and Measured Performance
 
-<small>Reference environment: `.31`, dual Intel Xeon E5-2673 v4 (40 cores / 80
+<small>Historical pre3 reference environment: `.31`, dual Intel Xeon E5-2673 v4 (40 cores / 80
 threads), 60 GiB RAM + 8 GiB swap, dual RTX 2080 Ti 22 GiB with NVLink (SM75),
 Ubuntu 26.04, kernel 7.0.0-30, driver 595.84, CUDA 13.0, PyTorch 2.13, vLLM
 0.27.1, TP=2/PP=1, CUDA Graph, no eager execution. Performance is 4K input /
-128 output, prefill / decode tok/s.</small> `-` means no stable measurement. See
-the [validation record](../docs/2080ti-0.2.1-pre-validation.md) for details.
+128 output, prefill / decode tok/s. These figures do not validate pre4, which
+uses upstream nightly `b23433088b`.</small> `-` means no stable measurement. See
+the [historical validation record](../docs/2080ti-0.2.1-pre-validation.md) for details.
 
 ### [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8)
 

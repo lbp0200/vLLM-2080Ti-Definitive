@@ -2,6 +2,21 @@
 
 This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately from upstream vLLM releases.
 
+## v0.2.1-pre4 - 2026-09-14
+
+`v0.2.1-pre4` is the nightly-alignment integration candidate for the CUDA 13 based 0.2.x line. It rebases the maintained SM75 work on upstream commit [`b23433088b`](https://github.com/vllm-project/vllm/commit/b23433088bf29980d20dff1bd64c753dd8883506), described upstream as `v0.29.1rc0-33`. The maintained 0.1.x line remains the project's primary stable release line.
+
+### Changes Since v0.2.1-pre3
+
+- Adopts the current upstream implementations where nightly already contains the relevant fixes, including block-pool reuse, NVML handling, GDN gating/context handling, and large-batch GDN launch behavior.
+- Retains only the fork-specific paths still required for SM75: legacy FlashQLA loading and packed-varlen execution, TurboQuant/FlashInfer adaptation, the bounded wrapper cache, selected Qwen3.5 MTP compatibility, thinking-budget parsing, and file rendezvous with the AITER TCPStore exception.
+- Keeps `humming-kernels[cu13]==0.1.13` because its INT6/AutoRound load fixes are still needed by the documented fork route.
+- Removes the nightly-added generic documentation, CI/release automation, and platform matrices that are not part of the local SM75 build or launcher workflow.
+
+### Validation Status
+
+- The pre3 target-GPU measurements remain historical evidence only. The materially newer upstream runtime requires the documented SM75 target routes to be rerun before pre4 is promoted beyond an integration candidate.
+
 ## v0.2.1-pre3 - 2026-08-27
 
 `v0.2.1-pre3` is the validated true-concurrency candidate for the CUDA 13 based 0.2.x line. The maintained 0.1.x line remains the project's primary stable release line.

@@ -3,7 +3,7 @@
 
 ![vLLM 2080 Ti Definitive Edition cover](docs/assets/vllm-2080ti-cover.jpg)
 
-Hardware-focused vLLM fork for dual RTX 2080 Ti 22 GB / SM75 serving. This is the `vllm-2080ti-definitive-0.2.x` maintenance branch: the public `0.2.x` prerelease line rebased on upstream vLLM `v0.27.1`, CUDA 13.0, and PyTorch 2.13. It is not the stable production default; the maintained `0.1.x` line remains the project's primary stable release line for CUDA 12.8 and PyTorch 2.11.
+Hardware-focused vLLM fork for dual RTX 2080 Ti 22 GB / SM75 serving. This is the `vllm-2080ti-definitive-0.2.x` maintenance branch: the public `0.2.x` prerelease line is aligned to upstream vLLM nightly commit [`b23433088b`](https://github.com/vllm-project/vllm/commit/b23433088bf29980d20dff1bd64c753dd8883506) (`v0.29.1rc0-33`), with CUDA 13.0 and PyTorch 2.13. It is not the stable production default; the maintained `0.1.x` line remains the project's primary stable release line for CUDA 12.8 and PyTorch 2.11.
 
 This project preserves the SM75-specific source changes, launcher profiles,
 and benchmark evidence needed to reproduce the dual-2080-Ti TP=2 stack. It is
@@ -14,12 +14,12 @@ Language: English | [Simplified Chinese](README.zh-CN.md)
 
 ![Live single-request throughput demo](docs/assets/vllmspeed.gif)
 
-Fork release: `0.2.1-pre3`
-Base vLLM: `0.27.1`
+Fork release: `0.2.1-pre4`
+Base vLLM: nightly `b23433088b` (`v0.29.1rc0-33`)
 
 Branch: [`vllm-2080ti-definitive-0.2.x`](https://github.com/weicj/vLLM-2080Ti-Definitive/tree/vllm-2080ti-definitive-0.2.x)
-Prerelease snapshot: [v0.2.1-pre3](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.1-pre3)
-Changes since pre2: [CHANGELOG.md](CHANGELOG.md)
+Prerelease snapshot: [v0.2.1-pre4](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.1-pre4)
+Changes since pre3: [CHANGELOG.md](CHANGELOG.md)
 
 ## Why RTX 2080 Ti For LLM Inference?
 
@@ -45,10 +45,13 @@ Marlin, FlashInfer/FlashQLA, TurboQuant/INT8 KV, MTP, and CUDA Graph support.
 The `0.2.x` target is Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15, CUDA 13.0, and PyTorch 2.13. The maintained `0.1.x` line remains the compatibility route for CUDA 12.8, PyTorch 2.11, older kernels, and GCC 12/13/14.
 
 The dual-2080-Ti CUDA Graph validation is recorded in
-[the migration report](docs/2080ti-0.2.1-pre-validation.md). It includes the
-exact host selection rule, build gate, correctness regressions, and 4K/128
-benchmark method. Do not treat a checkpoint that merely loads as a promoted
-deployment route.
+[the migration report](docs/2080ti-0.2.1-pre-validation.md). Those pre3
+measurements describe the exact host selection rule, build gate, correctness
+regressions, and 4K/128 benchmark method, but do not validate pre4. Do not
+treat a checkpoint that merely loads as a promoted deployment route.
+
+Pre4 is a nightly integration candidate. Rerun the documented SM75 target
+routes before using it as a promoted deployment build.
 
 The disposition of the previously merged SM75 PRs is recorded in [the 0.2.x PR migration audit](docs/0.2.x-pr-migration-audit.md).
 
@@ -125,7 +128,7 @@ the version pinned by this branch; the full Minachist route remains unverified.
 
 - Two RTX 2080 Ti 22 GB GPUs connected by NVLink
 - NVIDIA Turing / SM75, tensor parallel size 2
-- `0.2.1-pre3` target: CUDA 13.0, PyTorch 2.13, Python 3.12
+- `0.2.1-pre4` target: CUDA 13.0, PyTorch 2.13, Python 3.12
 - Target host: Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15
 
 Other Turing cards need independent validation for VRAM capacity, PCIe/NVLink
@@ -156,7 +159,7 @@ confirmed PCIe P2P and a separate profile validation.
 
 **Which CUDA and PyTorch versions apply?**
 
-The `0.2.1-pre3` target is CUDA 13.0 with PyTorch 2.13. The older CUDA 12.8 /
+The `0.2.1-pre4` target is CUDA 13.0 with PyTorch 2.13. The older CUDA 12.8 /
 PyTorch 2.11 stack remains a separate `v0.1.x` compatibility line. Keep the
 PyTorch CUDA build, toolkit, FlashInfer/FlashQLA build, and selected profile
 aligned; they are not interchangeable runtime combinations.
