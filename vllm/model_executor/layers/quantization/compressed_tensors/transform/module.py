@@ -91,8 +91,12 @@ class HadamardTransform(torch.nn.Module):
         if part_id not in self.weight.partitions:
             return value
 
-        # use hadacore if possible
-        if self.transforms[part_id].scheme.type == "hadamard":
+        # Hadacore is only built for newer CUDA architectures. Use its fast
+        # path when present and the checkpoint's transform matrix otherwise.
+        if (
+            self.transforms[part_id].scheme.type == "hadamard"
+            and hasattr(torch.ops._C, "hadacore_transform")
+        ):
             if self.transforms[part_id].scheme.head_dim is not None:
                 weight_size = self.transforms[part_id].scheme.head_dim
                 value = value.unflatten(-1, (-1, weight_size))
@@ -104,25 +108,19 @@ class HadamardTransform(torch.nn.Module):
             # sylvester transforms are symmetric, inv => transpose => original
             return ops.hadacore_transform(value)
 
-        # fall back to dense
-        else:
-            weight = self.weight.partitions[part_id]
-            weight = (
-                weight if self.transforms[part_id].args.inverse else weight.T
-            )  # linear := x(W.T)
-
-            if self.transforms[part_id].scheme.head_dim is not None:
-                value = value.unflatten(-1, (-1, weight.size(0)))
-                value = dispatch_unquantized_gemm()(
-                    self, value.to(weight.dtype), weight, None
-                ).to(value.dtype)
-                value = value.flatten(-2, -1)
-
-                return value
-
-            return dispatch_unquantized_gemm()(
+        weight = self.weight.partitions[part_id]
+        weight = weight if self.transforms[part_id].args.inverse else weight.T
+        # linear := x(W.T)
+        if self.transforms[part_id].scheme.head_dim is not None:
+            value = value.unflatten(-1, (-1, weight.size(0)))
+            value = dispatch_unquantized_gemm()(
                 self, value.to(weight.dtype), weight, None
             ).to(value.dtype)
+            return value.flatten(-2, -1)
+
+        return dispatch_unquantized_gemm()(
+            self, value.to(weight.dtype), weight, None
+        ).to(value.dtype)
 
     def _get_data_key(self, scheme: TransformScheme, weight_size: int) -> Hashable:
         return (id(scheme), weight_size)

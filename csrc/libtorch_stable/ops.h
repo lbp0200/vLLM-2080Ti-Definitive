@@ -111,16 +111,6 @@ void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
                            torch::stable::Tensor const& B_sf,
                            torch::stable::Tensor const& alpha);
 
-void cutlass_fp4_group_mm(torch::stable::Tensor& output,
-                          const torch::stable::Tensor& a,
-                          const torch::stable::Tensor& b,
-                          const torch::stable::Tensor& a_blockscale,
-                          const torch::stable::Tensor& b_blockscales,
-                          const torch::stable::Tensor& alphas,
-                          const torch::stable::Tensor& problem_sizes,
-                          const torch::stable::Tensor& expert_offsets,
-                          const torch::stable::Tensor& sf_offsets);
-
 std::tuple<torch::stable::Tensor, torch::stable::Tensor> scaled_fp4_quant_func(
     torch::stable::Tensor const& input,
     torch::stable::Tensor const& input_scale, bool is_sf_swizzled_layout);
@@ -150,15 +140,6 @@ void silu_and_mul_nvfp4_quant(torch::stable::Tensor& out,
                               torch::stable::Tensor& input,
                               torch::stable::Tensor& input_global_scale);
 
-void cutlass_mxfp4_group_mm(torch::stable::Tensor& output,
-                            const torch::stable::Tensor& a,
-                            const torch::stable::Tensor& b,
-                            const torch::stable::Tensor& a_blockscale,
-                            const torch::stable::Tensor& b_blockscales,
-                            const torch::stable::Tensor& problem_sizes,
-                            const torch::stable::Tensor& expert_offsets,
-                            const torch::stable::Tensor& sf_offsets);
-
 // AWQ ops
 torch::stable::Tensor awq_gemm(torch::stable::Tensor _in_feats,
                                torch::stable::Tensor _kernel,
@@ -171,12 +152,6 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
                                      torch::stable::Tensor _zeros,
                                      int64_t split_k_iters, int64_t thx,
                                      int64_t thy);
-
-// DSV3 fused A GEMM: conditionally compiled so declaration and impl
-// registration are in the source file (dsv3_fused_a_gemm.cu)
-
-// AllSpark ops: declarations are in the source files
-// (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 
 #endif
 
@@ -194,9 +169,6 @@ void merge_attn_states(
     const torch::stable::Tensor& suffix_lse,
     const std::optional<int64_t> prefill_tokens_with_context,
     const std::optional<torch::stable::Tensor>& output_scale = std::nullopt);
-
-torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
-                                         bool inplace);
 
 // Layernorm kernels (shared CUDA/ROCm)
 void rms_norm(torch::stable::Tensor& out, torch::stable::Tensor& input,

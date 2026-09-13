@@ -339,7 +339,7 @@ class cmake_build_ext(build_ext):
         targets = []
 
         def target_name(s: str) -> str:
-            return s.removeprefix("vllm.").removeprefix("vllm_flash_attn.")
+            return s.removeprefix("vllm.")
 
         # Build all the extensions
         for ext in self.extensions:
@@ -392,22 +392,6 @@ class cmake_build_ext(build_ext):
         if should_bundle_tcmalloc():
             bundle_tcmalloc(self.build_lib)
 
-        # copy vllm/vllm_flash_attn/**/*.py from self.build_lib to current
-        # directory so that they can be included in the editable build
-        import glob
-
-        files = glob.glob(
-            os.path.join(self.build_lib, "vllm", "vllm_flash_attn", "**", "*.py"),
-            recursive=True,
-        )
-        for file in files:
-            dst_file = os.path.join(
-                "vllm/vllm_flash_attn", file.split("vllm/vllm_flash_attn/")[-1]
-            )
-            print(f"Copying {file} to {dst_file}")
-            os.makedirs(os.path.dirname(dst_file), exist_ok=True)
-            self.copy_file(file, dst_file)
-
         if _is_cuda() or _is_hip():
             # copy vllm/third_party/triton_kernels/**/*.py from self.build_lib
             # to current directory so that they can be included in the editable
@@ -421,44 +405,6 @@ class cmake_build_ext(build_ext):
                 "vllm/third_party/triton_kernels",
                 dirs_exist_ok=True,
             )
-
-        if _is_cuda():
-            # copy vendored deep_gemm package from build_lib to source tree
-            # for editable installs
-            deep_gemm_build = os.path.join(
-                self.build_lib, "vllm", "third_party", "deep_gemm"
-            )
-            if os.path.exists(deep_gemm_build):
-                print(f"Copying {deep_gemm_build} to vllm/third_party/deep_gemm")
-                shutil.copytree(
-                    deep_gemm_build,
-                    "vllm/third_party/deep_gemm",
-                    dirs_exist_ok=True,
-                )
-
-            # copy vendored fmha_sm100 package from build_lib to source tree
-            # for editable installs
-            fmha_sm100_build = os.path.join(
-                self.build_lib, "vllm", "third_party", "fmha_sm100"
-            )
-            if os.path.exists(fmha_sm100_build):
-                print(f"Copying {fmha_sm100_build} to vllm/third_party/fmha_sm100")
-                shutil.copytree(
-                    fmha_sm100_build,
-                    "vllm/third_party/fmha_sm100",
-                    dirs_exist_ok=True,
-                )
-
-            tml_fa4_build = os.path.join(
-                self.build_lib, "vllm", "third_party", "tml_fa4"
-            )
-            if os.path.exists(tml_fa4_build):
-                print(f"Copying {tml_fa4_build} to vllm/third_party/tml_fa4")
-                shutil.copytree(
-                    tml_fa4_build,
-                    "vllm/third_party/tml_fa4",
-                    dirs_exist_ok=True,
-                )
 
 
 class precompiled_build_ext(build_ext):
@@ -1010,14 +956,6 @@ class precompiled_wheel_utils:
                             "vllm/_C.abi3.so",
                             "vllm/_C_stable_libtorch.abi3.so",
                             "vllm/_moe_C_stable_libtorch.abi3.so",
-                            "vllm/_qutlass_C.abi3.so",
-                            "vllm/_flashmla_C.abi3.so",
-                            "vllm/_flashmla_extension_C.abi3.so",
-                            "vllm/_flashkda_C.abi3.so",
-                            "vllm/_sparse_flashmla_C.abi3.so",
-                            "vllm/_deepselect_C.abi3.so",
-                            "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
-                            "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                             "vllm/cumem_allocator.abi3.so",
                             "vllm/spinloop.abi3.so",
                             "vllm/fs_io_C.abi3.so",
@@ -1028,25 +966,9 @@ class precompiled_wheel_utils:
                 if extract_rust_frontend:
                     exact_members.add("vllm/vllm-rs")
 
-                flash_attn_regex = re.compile(
-                    r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
-                )
-                # __init__.py and flash_attn_interface.py are source-controlled
-                # in vllm and should not be overwritten (matches cmake exclusions)
-                flash_attn_files_to_skip = {
-                    "vllm/vllm_flash_attn/__init__.py",
-                    "vllm/vllm_flash_attn/flash_attn_interface.py",
-                }
                 triton_kernels_regex = re.compile(
                     r"vllm/third_party/triton_kernels/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
-                flashmla_regex = re.compile(
-                    r"vllm/third_party/flashmla/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
-                )
-                # DeepGEMM: extract all files (.py, .so, .cuh, .h, .hpp, etc.)
-                deep_gemm_regex = re.compile(r"vllm/third_party/deep_gemm/.*")
-                fmha_sm100_regex = re.compile(r"vllm/third_party/fmha_sm100/.*")
-                tml_fa4_regex = re.compile(r"vllm/third_party/tml_fa4/.*")
                 file_members = []
                 for member in wheel.filelist:
                     if member.filename in exact_members:
@@ -1064,17 +986,7 @@ class precompiled_wheel_utils:
                     if not extract_extensions:
                         continue
 
-                    if (
-                        (
-                            flash_attn_regex.match(member.filename)
-                            and member.filename not in flash_attn_files_to_skip
-                        )
-                        or triton_kernels_regex.match(member.filename)
-                        or flashmla_regex.match(member.filename)
-                        or deep_gemm_regex.match(member.filename)
-                        or tml_fa4_regex.match(member.filename)
-                        or fmha_sm100_regex.match(member.filename)
-                    ):
+                    if triton_kernels_regex.match(member.filename):
                         file_members.append(member)
 
                 for file in file_members:
@@ -1345,17 +1257,6 @@ def get_requirements() -> list[str]:
     return requirements
 
 
-def is_sm75_only_build() -> bool:
-    """Whether this build targets only the SM75/Turing compatibility lane."""
-    arch_list = os.getenv("TORCH_CUDA_ARCH_LIST", "")
-    target_archs = {
-        arch.removesuffix("+PTX")
-        for arch in re.split(r"[;,\s]+", arch_list)
-        if arch
-    }
-    return target_archs == {"7.5"}
-
-
 ext_modules = []
 
 if _is_cuda() or _is_hip():
@@ -1370,52 +1271,6 @@ if not _is_xpu() and sys.version_info >= (3, 11):
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
-
-if _is_cuda():
-    if not is_sm75_only_build():
-        ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
-        if USE_PRECOMPILED_EXTENSIONS or (
-            CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
-        ):
-            # FA3 requires CUDA 12.3 or later
-            ext_modules.append(
-                CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C")
-            )
-        # FA4 CuteDSL - Python-only component for FA4's cute DSL support
-        # Optional since this doesn't produce a .so file, just copies Python files
-        ext_modules.append(
-            CMakeExtension(
-                name="vllm.vllm_flash_attn._vllm_fa4_cutedsl_C", optional=True
-            )
-        )
-        # DeepSelect requires CUDA 12.9 or later (SM100a/SM103a only)
-        # Optional since it won't build on unsupported architectures
-        ext_modules.append(CMakeExtension(name="vllm._deepselect_C", optional=True))
-        if USE_PRECOMPILED_EXTENSIONS or (
-            CUDA_HOME and get_nvcc_cuda_version() >= Version("12.9")
-        ):
-            # FlashMLA requires CUDA 12.9 or later
-            # Optional since this doesn't get built (produce an .so file) when
-            # not targeting a hopper system
-            ext_modules.append(CMakeExtension(name="vllm._flashmla_C", optional=True))
-            ext_modules.append(
-                CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
-            )
-        if USE_PRECOMPILED_EXTENSIONS or (
-            CUDA_HOME and get_nvcc_cuda_version() >= Version("12.0")
-        ):
-            ext_modules.append(CMakeExtension(name="vllm._flashkda_C", optional=True))
-        if envs.VLLM_USE_PRECOMPILED or (
-            CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
-        ):
-            # DeepGEMM requires CUDA 12.3+ (SM90/SM100)
-            # Optional since it won't build on unsupported architectures
-            ext_modules.append(CMakeExtension(name="vllm._deep_gemm_C", optional=True))
-            ext_modules.append(CMakeExtension(name="vllm._qutlass_C", optional=True))
-        # fmha_sm100 is a Python/CuTe-DSL package installed into vllm.third_party.
-        ext_modules.append(CMakeExtension(name="vllm.fmha_sm100", optional=True))
-        # tml-fa4 is copied into an isolated vllm.third_party package.
-        ext_modules.append(CMakeExtension(name="vllm.tml_fa4", optional=True))
 
 if _is_cpu():
     import platform
@@ -1446,20 +1301,6 @@ package_data = {
         # Built-in multimodal chat template fallbacks (registry.py)
         "transformers_utils/chat_templates/*.jinja",
         "third_party/flash_linear_attention/LICENSE",
-        # DeepGEMM JIT include headers (vendored via cmake)
-        "third_party/deep_gemm/include/**/*.cuh",
-        "third_party/deep_gemm/include/**/*.h",
-        "third_party/deep_gemm/include/**/*.hpp",
-        # fmha_sm100 sparse CuTe-DSL helper kernels (vendored via cmake)
-        "third_party/fmha_sm100/csrc/**/*.cu",
-        "third_party/fmha_sm100/csrc/**/*.h",
-        "third_party/fmha_sm100/csrc/**/*.jinja",
-        "third_party/fmha_sm100/csrc/**/*.cu.jinja",
-        "third_party/fmha_sm100/cute/**/*.cu",
-        "third_party/fmha_sm100/cutlass/include/**/*.h",
-        "third_party/fmha_sm100/cutlass/include/**/*.hpp",
-        "third_party/fmha_sm100/cutlass/tools/util/include/**/*.h",
-        "third_party/fmha_sm100/cutlass/tools/util/include/**/*.hpp",
     ]
 }
 
