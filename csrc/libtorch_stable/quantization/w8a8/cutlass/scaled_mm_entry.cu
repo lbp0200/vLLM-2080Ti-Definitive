@@ -14,20 +14,6 @@ void cutlass_scaled_mm_sm75(torch::stable::Tensor& c,
                             torch::stable::Tensor const& b_scales,
                             std::optional<torch::stable::Tensor> const& bias);
 
-void cutlass_scaled_mm_sm80(torch::stable::Tensor& c,
-                            torch::stable::Tensor const& a,
-                            torch::stable::Tensor const& b,
-                            torch::stable::Tensor const& a_scales,
-                            torch::stable::Tensor const& b_scales,
-                            std::optional<torch::stable::Tensor> const& bias);
-
-void cutlass_scaled_mm_sm89(torch::stable::Tensor& c,
-                            torch::stable::Tensor const& a,
-                            torch::stable::Tensor const& b,
-                            torch::stable::Tensor const& a_scales,
-                            torch::stable::Tensor const& b_scales,
-                            std::optional<torch::stable::Tensor> const& bias);
-
 #if defined ENABLE_SCALED_MM_SM90 && ENABLE_SCALED_MM_SM90
 void cutlass_scaled_mm_sm90(torch::stable::Tensor& c,
                             torch::stable::Tensor const& a,
@@ -119,20 +105,6 @@ void cutlass_scaled_mm_azp_sm75(
     std::optional<torch::stable::Tensor> const& azp,
     std::optional<torch::stable::Tensor> const& bias);
 
-void cutlass_scaled_mm_azp_sm80(
-    torch::stable::Tensor& c, torch::stable::Tensor const& a,
-    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
-    torch::stable::Tensor const& b_scales, torch::stable::Tensor const& azp_adj,
-    std::optional<torch::stable::Tensor> const& azp,
-    std::optional<torch::stable::Tensor> const& bias);
-
-void cutlass_scaled_mm_azp_sm89(
-    torch::stable::Tensor& c, torch::stable::Tensor const& a,
-    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
-    torch::stable::Tensor const& b_scales, torch::stable::Tensor const& azp_adj,
-    std::optional<torch::stable::Tensor> const& azp,
-    std::optional<torch::stable::Tensor> const& bias);
-
 #if defined ENABLE_SCALED_MM_SM90 && ENABLE_SCALED_MM_SM90
 void cutlass_scaled_mm_azp_sm90(
     torch::stable::Tensor& c, torch::stable::Tensor const& a,
@@ -142,55 +114,15 @@ void cutlass_scaled_mm_azp_sm90(
     std::optional<torch::stable::Tensor> const& bias);
 #endif
 
-bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability) {
-  // CUTLASS FP8 kernels need at least
-  //   CUDA 12.0 on SM90 systems (Hopper)
-  //   CUDA 12.4 on SM89 systems (Lovelace)
-
-#if defined CUDA_VERSION
-  if (cuda_device_capability >= 90) {
-    return CUDA_VERSION >= 12000;
-  } else if (cuda_device_capability >= 89) {
-    return CUDA_VERSION >= 12040;
-  }
-#endif
-
+bool cutlass_scaled_mm_supports_fp8(int64_t) {
   return false;
 }
 
-bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability) {
-  // CUTLASS block-quantized FP8 kernels need at least CUDA 12.0
-  // and at least SM90 (Hopper)
-
-#if defined CUDA_VERSION
-  if (cuda_device_capability >= 100) {
-    return CUDA_VERSION >= 12080;
-  } else if (cuda_device_capability >= 90) {
-    return CUDA_VERSION >= 12000;
-  }
-#endif
-
+bool cutlass_scaled_mm_supports_block_fp8(int64_t) {
   return false;
 }
 
-bool cutlass_group_gemm_supported(int64_t cuda_device_capability) {
-  // CUTLASS grouped FP8 kernels need at least CUDA 12.3 and SM90 (Hopper)
-  // or CUDA 12.8 and SM100 (Blackwell). Only report archs that have an
-  // actual cutlass_moe_mm dispatch compiled into this file.
-
-#if defined CUDA_VERSION
-  #if defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100
-  if (cuda_device_capability >= 100 && cuda_device_capability < 120) {
-    return CUDA_VERSION >= 12080;
-  }
-  #endif
-  #if defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90
-  if (cuda_device_capability >= 90 && cuda_device_capability < 100) {
-    return CUDA_VERSION >= 12030;
-  }
-  #endif
-#endif
-
+bool cutlass_group_gemm_supported(int64_t) {
   return false;
 }
 
@@ -243,20 +175,7 @@ void cutlass_scaled_mm(torch::stable::Tensor& c, torch::stable::Tensor const& a,
 #endif
 
 #if defined ENABLE_SCALED_MM_C2X && ENABLE_SCALED_MM_C2X
-  if (version_num == 89) {
-    // Ada Lovelace
-    cutlass_scaled_mm_sm89(c, a, b, a_scales, b_scales, bias);
-    return;
-  }
-
-  if (version_num >= 80) {
-    // Ampere
-    cutlass_scaled_mm_sm80(c, a, b, a_scales, b_scales, bias);
-    return;
-  }
-
   if (version_num >= 75) {
-    // Turing
     cutlass_scaled_mm_sm75(c, a, b, a_scales, b_scales, bias);
     return;
   }
@@ -431,19 +350,6 @@ void cutlass_scaled_mm_azp(torch::stable::Tensor& c,
 #endif
 
 #if defined ENABLE_SCALED_MM_C2X && ENABLE_SCALED_MM_C2X
-  if (version_num == 89) {
-    // Ada Lovelace
-    cutlass_scaled_mm_azp_sm89(c, a, b, a_scales, b_scales, azp_adj, azp, bias);
-    return;
-  }
-
-  if (version_num >= 80) {
-    // Ampere
-    cutlass_scaled_mm_azp_sm80(c, a, b, a_scales, b_scales, azp_adj, azp, bias);
-    return;
-  }
-
-  // Turing
   STD_TORCH_CHECK(version_num >= 75);
   cutlass_scaled_mm_azp_sm75(c, a, b, a_scales, b_scales, azp_adj, azp, bias);
   return;
