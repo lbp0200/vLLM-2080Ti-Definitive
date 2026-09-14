@@ -147,50 +147,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "cutlass_scaled_mm_supports_block_fp8(int cuda_device_capability) -> "
       "bool");
 
-  // CUTLASS nvfp4 block scaled GEMM
-  ops.def(
-      "cutlass_scaled_fp4_mm(Tensor! out, Tensor a, Tensor b,"
-      "                      Tensor block_scale_a, Tensor block_scale_b,"
-      "                      Tensor alpha) -> ()");
-
-  // Compute NVFP4 block quantized tensor.
-  ops.def(
-      "scaled_fp4_quant(Tensor input,"
-      "                 Tensor input_scale, bool "
-      "is_sf_swizzled_layout) -> (Tensor, Tensor)");
-
-  // Out variant
-  // TODO: Add out_variant tag once PyTorch supports it (added in 2.11)
-  // This registration is now migrated to stable ABI
-  // at::Tag::out_variant is not available in the stable ABI (enum_tag.h is not
-  // yet in torch/headeronly), the tag should be applied from Python
-  // via torch.library.Library.define(..., tags=(torch.Tag.out_variant,))
-  // with the .impl remaining in C++.
-  // See pytorch/pytorch#176117.
-  ops.def(
-      "scaled_fp4_quant.out(Tensor input,"
-      "                     Tensor input_scale, bool "
-      "is_sf_swizzled_layout, *, Tensor(a!) output, Tensor(b!) output_scale) "
-      "-> ()");
-
-  // Compute NVFP4 experts quantization.
-  ops.def(
-      "scaled_fp4_experts_quant(Tensor! output, Tensor! output_scale,"
-      "Tensor input, Tensor input_global_scale, Tensor input_offset_by_experts,"
-      "Tensor output_scale_offset_by_experts) -> ()");
-
-  // Fused SiLU+Mul+NVFP4 experts quantization.
-  ops.def(
-      "silu_and_mul_scaled_fp4_experts_quant(Tensor! output, Tensor! "
-      "output_scale,"
-      "Tensor input, Tensor input_global_scale, Tensor input_offset_by_experts,"
-      "Tensor output_scale_offset_by_experts) -> ()");
-
-  // Fused SiLU+Mul+NVFP4 quantization.
-  ops.def(
-      "silu_and_mul_nvfp4_quant(Tensor! result, Tensor! result_block_scale, "
-      "Tensor input, Tensor input_global_scale) -> ()");
-
   // Check if cutlass_scaled_mm_fp4 is supported for CUDA devices
   // of the given capability
   ops.def("cutlass_scaled_mm_supports_fp4(int cuda_device_capability) -> bool");
@@ -283,76 +239,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
       "bool is_neox, Tensor position_ids, "
       "int forced_token_heads_per_warp=-1) -> ()");
-
-  ops.def(
-      "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert("
-      "Tensor q_in, Tensor kv, Tensor! k_cache, "
-      "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
-      "int q_head_padded, float eps, int cache_block_size, "
-      "bool apply_q_norm=True) -> Tensor");
-
-  // FlashInfer V4 full-cache variants: write Q in place (bf16) or to a separate
-  // FP8 tensor, and KV into a contiguous 512-wide token-strided cache.
-  ops.def(
-      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert("
-      "Tensor! q, Tensor kv, Tensor! k_cache, Tensor slot_mapping, "
-      "Tensor position_ids, Tensor cos_sin_cache, float eps, "
-      "int cache_block_size, bool apply_q_norm=True) -> ()");
-  ops.def(
-      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert("
-      "Tensor q, Tensor kv, Tensor! q_fp8, Tensor! k_cache, "
-      "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
-      "Tensor fp8_scale, Tensor q_fp8_scale_inv, float eps, "
-      "int cache_block_size, bool apply_q_norm=True) -> ()");
-
-  // Kimi-K3 MLA epilogues: optional RoPE followed by concat/cache insertion.
-  ops.def(
-      "fused_kimi_k3_mla_key_concat_kv_cache_insert("
-      "Tensor! q, Tensor k_nope, Tensor k_pe, Tensor kv_c_normed, "
-      "Tensor! k_out, Tensor! k_cache, Tensor slot_mapping, "
-      "int cache_block_size, Tensor? position_ids=None, "
-      "Tensor? cos_sin_cache=None) -> ()");
-  ops.def(
-      "fused_kimi_k3_mla_key_concat_ds_mla_insert("
-      "Tensor! q, Tensor k_nope, Tensor k_pe, Tensor kv_c_normed, "
-      "Tensor! k_out, Tensor! k_cache, Tensor slot_mapping, "
-      "int cache_block_size, Tensor? position_ids=None, "
-      "Tensor? cos_sin_cache=None) -> ()");
-  ops.def(
-      "fused_kimi_k3_mla_kv_concat(Tensor k_nope, Tensor k_pe, Tensor! k_out) "
-      "-> ()");
-  ops.def(
-      "fused_kimi_k3_mla_kv_concat_quant_fp8("
-      "Tensor k_nope, Tensor k_pe, Tensor v, Tensor! k_fp8, Tensor! v_fp8) "
-      "-> ()");
-  ops.def(
-      "fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert("
-      "Tensor q, Tensor k_nope, Tensor k_pe, Tensor kv_c_normed, Tensor v, "
-      "Tensor! q_fp8, Tensor! k_fp8, Tensor! v_fp8, Tensor! k_cache, "
-      "Tensor slot_mapping, Tensor q_scale_inv, Tensor k_scale_inv, "
-      "Tensor v_scale_inv, Tensor cache_scale_inv, int cache_block_size, "
-      "Tensor? position_ids=None, Tensor? cos_sin_cache=None) -> ()");
-
-  // Kimi-K3 MLA decode epilogue: concat mqa_q = [ql_nope | q_pe] and insert the
-  // latent [kv_c_normed | k_pe] into the paged cache (bf16 / fp8 / fp8_ds_mla).
-  ops.def(
-      "fused_kimi_k3_mla_decode_q_concat_kv_cache_insert("
-      "Tensor ql_nope, Tensor q_pe, Tensor kv_c_normed, Tensor k_pe, "
-      "Tensor! mqa_q, Tensor! k_cache, Tensor slot_mapping, "
-      "int cache_block_size, Tensor? position_ids=None, "
-      "Tensor? cos_sin_cache=None) -> ()");
-  ops.def(
-      "fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert("
-      "Tensor ql_nope, Tensor q_pe, Tensor kv_c_normed, Tensor k_pe, "
-      "Tensor! mqa_q, Tensor! k_cache, Tensor slot_mapping, "
-      "Tensor q_scale_inv, Tensor cache_scale_inv, int cache_block_size, "
-      "Tensor? position_ids=None, Tensor? cos_sin_cache=None) -> ()");
-  ops.def(
-      "fused_kimi_k3_mla_decode_q_concat_ds_mla_insert("
-      "Tensor ql_nope, Tensor q_pe, Tensor kv_c_normed, Tensor k_pe, "
-      "Tensor! mqa_q, Tensor! k_cache, Tensor slot_mapping, "
-      "int cache_block_size, Tensor? position_ids=None, "
-      "Tensor? cos_sin_cache=None) -> ()");
 
 #ifndef USE_ROCM
   ops.def(
@@ -623,14 +509,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("get_cutlass_batched_moe_mm_data",
            TORCH_BOX(&get_cutlass_batched_moe_mm_data));
 
-  // FP4/NVFP4 ops
-  ops.impl("cutlass_scaled_fp4_mm", TORCH_BOX(&cutlass_scaled_fp4_mm));
-  ops.impl("scaled_fp4_quant", TORCH_BOX(&scaled_fp4_quant_func));
-  ops.impl("scaled_fp4_quant.out", TORCH_BOX(&scaled_fp4_quant_out));
-  ops.impl("scaled_fp4_experts_quant", TORCH_BOX(&scaled_fp4_experts_quant));
-  ops.impl("silu_and_mul_scaled_fp4_experts_quant",
-           TORCH_BOX(&silu_and_mul_scaled_fp4_experts_quant));
-  ops.impl("silu_and_mul_nvfp4_quant", TORCH_BOX(&silu_and_mul_nvfp4_quant));
   // AWQ ops
   ops.impl("awq_gemm", TORCH_BOX(&awq_gemm));
   ops.impl("awq_dequantize", TORCH_BOX(&awq_dequantize));
@@ -658,30 +536,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
   ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
-  ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
-           TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert));
-  ops.impl(
-      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert",
-      TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert));
-  ops.impl(
-      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert",
-      TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert));
-  ops.impl("fused_kimi_k3_mla_key_concat_kv_cache_insert",
-           TORCH_BOX(&fused_kimi_k3_mla_key_concat_kv_cache_insert));
-  ops.impl("fused_kimi_k3_mla_key_concat_ds_mla_insert",
-           TORCH_BOX(&fused_kimi_k3_mla_key_concat_ds_mla_insert));
-  ops.impl("fused_kimi_k3_mla_kv_concat",
-           TORCH_BOX(&fused_kimi_k3_mla_kv_concat));
-  ops.impl("fused_kimi_k3_mla_kv_concat_quant_fp8",
-           TORCH_BOX(&fused_kimi_k3_mla_kv_concat_quant_fp8));
-  ops.impl("fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert",
-           TORCH_BOX(&fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert));
-  ops.impl("fused_kimi_k3_mla_decode_q_concat_kv_cache_insert",
-           TORCH_BOX(&fused_kimi_k3_mla_decode_q_concat_kv_cache_insert));
-  ops.impl("fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert",
-           TORCH_BOX(&fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert));
-  ops.impl("fused_kimi_k3_mla_decode_q_concat_ds_mla_insert",
-           TORCH_BOX(&fused_kimi_k3_mla_decode_q_concat_ds_mla_insert));
 #ifndef USE_ROCM
   ops.impl("minimax_allreduce_rms_qk", TORCH_BOX(&minimax_allreduce_rms_qk));
 #endif

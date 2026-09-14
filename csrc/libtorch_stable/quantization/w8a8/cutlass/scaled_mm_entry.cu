@@ -122,6 +122,10 @@ bool cutlass_scaled_mm_supports_block_fp8(int64_t) {
   return false;
 }
 
+bool cutlass_scaled_mm_supports_fp4(int64_t) {
+  return false;
+}
+
 bool cutlass_group_gemm_supported(int64_t) {
   return false;
 }

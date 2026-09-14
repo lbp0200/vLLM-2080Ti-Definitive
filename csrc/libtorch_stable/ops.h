@@ -101,44 +101,8 @@ void get_cutlass_batched_moe_mm_data(
     const int64_t num_local_experts, const int64_t padded_m, const int64_t n,
     const int64_t k);
 
-// FP4/NVFP4 ops
+// FP4/NVFP4 capability query
 bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability);
-
-void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
-                           torch::stable::Tensor const& A,
-                           torch::stable::Tensor const& B,
-                           torch::stable::Tensor const& A_sf,
-                           torch::stable::Tensor const& B_sf,
-                           torch::stable::Tensor const& alpha);
-
-std::tuple<torch::stable::Tensor, torch::stable::Tensor> scaled_fp4_quant_func(
-    torch::stable::Tensor const& input,
-    torch::stable::Tensor const& input_scale, bool is_sf_swizzled_layout);
-
-void scaled_fp4_quant_out(torch::stable::Tensor const& input,
-                          torch::stable::Tensor const& input_scale,
-                          bool is_sf_swizzled_layout,
-                          torch::stable::Tensor& output,
-                          torch::stable::Tensor& output_scale);
-
-void scaled_fp4_experts_quant(
-    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
-    torch::stable::Tensor const& input,
-    torch::stable::Tensor const& input_global_scale,
-    torch::stable::Tensor const& input_offset_by_experts,
-    torch::stable::Tensor const& output_scale_offset_by_experts);
-
-void silu_and_mul_scaled_fp4_experts_quant(
-    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
-    torch::stable::Tensor const& input,
-    torch::stable::Tensor const& input_global_scale,
-    torch::stable::Tensor const& input_offset_by_experts,
-    torch::stable::Tensor const& output_scale_offset_by_experts);
-
-void silu_and_mul_nvfp4_quant(torch::stable::Tensor& out,
-                              torch::stable::Tensor& output_block_scale,
-                              torch::stable::Tensor& input,
-                              torch::stable::Tensor& input_global_scale);
 
 // AWQ ops
 torch::stable::Tensor awq_gemm(torch::stable::Tensor _in_feats,
@@ -230,95 +194,6 @@ void fused_qk_norm_rope(torch::stable::Tensor& qkv, int64_t num_heads_q,
                         torch::stable::Tensor& cos_sin_cache, bool is_neox,
                         torch::stable::Tensor& position_ids,
                         int64_t forced_token_heads_per_warp);
-
-torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-    torch::stable::Tensor const& q_in, torch::stable::Tensor const& kv,
-    torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
-    torch::stable::Tensor const& position_ids,
-    torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
-    double eps, int64_t cache_block_size, bool apply_q_norm);
-
-void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
-    torch::stable::Tensor& q, torch::stable::Tensor const& kv,
-    torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
-    torch::stable::Tensor const& position_ids,
-    torch::stable::Tensor const& cos_sin_cache, double eps,
-    int64_t cache_block_size, bool apply_q_norm);
-
-void fused_kimi_k3_mla_key_concat_kv_cache_insert(
-    torch::stable::Tensor& q, torch::stable::Tensor const& k_nope,
-    torch::stable::Tensor const& k_pe, torch::stable::Tensor const& kv_c_normed,
-    torch::stable::Tensor& k_out, torch::stable::Tensor& k_cache,
-    torch::stable::Tensor const& slot_mapping, int64_t cache_block_size,
-    std::optional<torch::stable::Tensor> position_ids,
-    std::optional<torch::stable::Tensor> cos_sin_cache);
-
-void fused_kimi_k3_mla_key_concat_ds_mla_insert(
-    torch::stable::Tensor& q, torch::stable::Tensor const& k_nope,
-    torch::stable::Tensor const& k_pe, torch::stable::Tensor const& kv_c_normed,
-    torch::stable::Tensor& k_out, torch::stable::Tensor& k_cache,
-    torch::stable::Tensor const& slot_mapping, int64_t cache_block_size,
-    std::optional<torch::stable::Tensor> position_ids,
-    std::optional<torch::stable::Tensor> cos_sin_cache);
-
-void fused_kimi_k3_mla_kv_concat(torch::stable::Tensor const& k_nope,
-                                 torch::stable::Tensor const& k_pe,
-                                 torch::stable::Tensor& k_out);
-
-void fused_kimi_k3_mla_kv_concat_quant_fp8(torch::stable::Tensor const& k_nope,
-                                           torch::stable::Tensor const& k_pe,
-                                           torch::stable::Tensor const& v,
-                                           torch::stable::Tensor& k_fp8,
-                                           torch::stable::Tensor& v_fp8);
-
-void fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert(
-    torch::stable::Tensor const& q, torch::stable::Tensor const& k_nope,
-    torch::stable::Tensor const& k_pe, torch::stable::Tensor const& kv_c_normed,
-    torch::stable::Tensor const& v, torch::stable::Tensor& q_fp8,
-    torch::stable::Tensor& k_fp8, torch::stable::Tensor& v_fp8,
-    torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
-    torch::stable::Tensor const& q_scale_inv,
-    torch::stable::Tensor const& k_scale_inv,
-    torch::stable::Tensor const& v_scale_inv,
-    torch::stable::Tensor const& cache_scale_inv, int64_t cache_block_size,
-    std::optional<torch::stable::Tensor> position_ids,
-    std::optional<torch::stable::Tensor> cos_sin_cache);
-
-void fused_kimi_k3_mla_decode_q_concat_kv_cache_insert(
-    torch::stable::Tensor const& ql_nope, torch::stable::Tensor const& q_pe,
-    torch::stable::Tensor const& kv_c_normed, torch::stable::Tensor const& k_pe,
-    torch::stable::Tensor& mqa_q, torch::stable::Tensor& k_cache,
-    torch::stable::Tensor const& slot_mapping, int64_t cache_block_size,
-    std::optional<torch::stable::Tensor> position_ids,
-    std::optional<torch::stable::Tensor> cos_sin_cache);
-
-void fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert(
-    torch::stable::Tensor const& ql_nope, torch::stable::Tensor const& q_pe,
-    torch::stable::Tensor const& kv_c_normed, torch::stable::Tensor const& k_pe,
-    torch::stable::Tensor& mqa_q, torch::stable::Tensor& k_cache,
-    torch::stable::Tensor const& slot_mapping,
-    torch::stable::Tensor const& q_scale_inv,
-    torch::stable::Tensor const& cache_scale_inv, int64_t cache_block_size,
-    std::optional<torch::stable::Tensor> position_ids,
-    std::optional<torch::stable::Tensor> cos_sin_cache);
-
-void fused_kimi_k3_mla_decode_q_concat_ds_mla_insert(
-    torch::stable::Tensor const& ql_nope, torch::stable::Tensor const& q_pe,
-    torch::stable::Tensor const& kv_c_normed, torch::stable::Tensor const& k_pe,
-    torch::stable::Tensor& mqa_q, torch::stable::Tensor& k_cache,
-    torch::stable::Tensor const& slot_mapping, int64_t cache_block_size,
-    std::optional<torch::stable::Tensor> position_ids,
-    std::optional<torch::stable::Tensor> cos_sin_cache);
-
-void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
-    torch::stable::Tensor const& q, torch::stable::Tensor const& kv,
-    torch::stable::Tensor& q_fp8, torch::stable::Tensor& k_cache,
-    torch::stable::Tensor const& slot_mapping,
-    torch::stable::Tensor const& position_ids,
-    torch::stable::Tensor const& cos_sin_cache,
-    torch::stable::Tensor const& fp8_scale,
-    torch::stable::Tensor const& q_fp8_scale_inv, double eps,
-    int64_t cache_block_size, bool apply_q_norm);
 
 #ifndef USE_ROCM
 std::tuple<torch::stable::Tensor, torch::stable::Tensor>
