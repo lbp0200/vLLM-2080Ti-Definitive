@@ -218,7 +218,7 @@ class KVCacheManager:
         Returns:
             The KV cache usage (between 0.0 and 1.0).
         """
-        return self.block_pool.get_usage()
+        return self.coordinator.get_usage()
 
     def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
         """Get (and reset) the prefix cache stats.
@@ -504,9 +504,25 @@ class KVCacheManager:
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
             )
-            required_blocks = num_blocks_to_allocate + watermark_blocks
-            if required_blocks > self.block_pool.get_num_free_blocks():
-                return None
+            if self.kv_cache_config.independent_block_pools:
+                counts = self.coordinator.get_num_blocks_to_allocate_by_group(
+                    request_id=request.request_id,
+                    num_tokens=full_num_tokens,
+                    new_computed_blocks=new_computed_block_list,
+                    num_encoder_tokens=num_encoder_tokens,
+                    total_computed_tokens=total_computed_tokens,
+                    num_local_computed_tokens=num_local_computed_tokens,
+                    num_tokens_main_model=full_num_tokens,
+                    apply_admission_cap=True,
+                )
+                if not self.coordinator.can_allocate(
+                    [count + watermark_blocks + reserved_blocks for count in counts]
+                ):
+                    return None
+            else:
+                required_blocks = num_blocks_to_allocate + watermark_blocks
+                if required_blocks > self.block_pool.get_num_free_blocks():
+                    return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
         num_tokens_need_slot = min(
@@ -541,11 +557,27 @@ class KVCacheManager:
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
         # additional watermark of headroom for waiting/preempted admissions.
-        available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
-        required_blocks = num_blocks_to_allocate + watermark_blocks
-        if required_blocks > available_blocks:
-            # Cannot allocate new blocks
-            return None
+        if self.kv_cache_config.independent_block_pools:
+            counts = self.coordinator.get_num_blocks_to_allocate_by_group(
+                request_id=request.request_id,
+                num_tokens=num_tokens_need_slot,
+                new_computed_blocks=new_computed_block_list,
+                num_encoder_tokens=num_encoder_tokens,
+                total_computed_tokens=num_local_computed_tokens
+                + num_external_computed_tokens,
+                num_local_computed_tokens=num_local_computed_tokens,
+                num_tokens_main_model=num_tokens_main_model,
+            )
+            if not self.coordinator.can_allocate(
+                [count + watermark_blocks + reserved_blocks for count in counts]
+            ):
+                return None
+        else:
+            available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
+            required_blocks = num_blocks_to_allocate + watermark_blocks
+            if required_blocks > available_blocks:
+                # Cannot allocate new blocks
+                return None
 
         if (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
@@ -633,7 +665,7 @@ class KVCacheManager:
         Args:
             block_ids: Set of block IDs to evict from cache.
         """
-        self.block_pool.evict_blocks(block_ids)
+        self.coordinator.evict_blocks(block_ids)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -691,7 +723,7 @@ class KVCacheManager:
         Returns:
             A list of KV cache events.
         """
-        events = self.block_pool.take_events()
+        events = self.coordinator.take_events()
         for event in events:
             if not isinstance(event, BlockStored):
                 continue
@@ -820,8 +852,14 @@ class KVCacheManager:
             truncated.append(list(group_blocks[:num_blocks]))
         return self.create_kv_cache_blocks(tuple(truncated))
 
-    def take_new_block_ids(self) -> list[int]:
+    def take_new_block_ids(self) -> list[int] | dict[int, list[int]]:
         """Drain and return new attention block IDs for zeroing."""
+        if isinstance(self.kv_cache_config.num_blocks_per_group, tuple):
+            return {
+                group_id: ids
+                for group_id, mgr in enumerate(self.coordinator.single_type_managers)
+                if (ids := mgr.take_new_block_ids())
+            }
         ids: list[int] = []
         for mgr in self.coordinator.single_type_managers:
             ids.extend(mgr.take_new_block_ids())
@@ -829,9 +867,21 @@ class KVCacheManager:
 
     def get_zeroing_block_ids_in_range(
         self, request_id: str, start_token: int, end_token: int
-    ) -> list[int]:
+    ) -> list[int] | dict[int, list[int]]:
         """The request's block ids covering [start_token, end_token), from
         the groups whose new blocks are zeroed by the worker."""
+        if isinstance(self.kv_cache_config.num_blocks_per_group, tuple):
+            ids_by_group: dict[int, list[int]] = {}
+            for group_id, mgr in enumerate(self.coordinator.single_type_managers):
+                if not mgr.records_new_block_ids:
+                    continue
+                start_idx = start_token // mgr.block_size
+                end_idx = cdiv(end_token, mgr.block_size)
+                blocks = mgr.req_to_blocks[request_id]
+                ids = [blk.block_id for blk in blocks[start_idx:end_idx]]
+                if ids:
+                    ids_by_group[group_id] = ids
+            return ids_by_group
         ids: list[int] = []
         for mgr in self.coordinator.single_type_managers:
             if mgr.records_new_block_ids:

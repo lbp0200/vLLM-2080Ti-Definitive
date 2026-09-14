@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -12,12 +14,20 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
+from .dflash2_sm75 import (
+    Sm75DFlash2MLP,
+    Sm75DFlash2ResidualNorm,
+    dflash2_sm75_residual_gain,
+    should_enable_dflash2_sm75,
+)
 from .qwen3_dflash import (
     DFlashQwen3DecoderLayer,
     DFlashQwen3ForCausalLM,
     DFlashQwen3Model,
 )
 from .utils import maybe_prefix
+
+logger = logging.getLogger(__name__)
 
 
 def _grouped_conv(
@@ -28,9 +38,20 @@ def _grouped_conv(
     num_groups: int,
     group_size: int,
     taps: int,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    blocks = hidden_states.unflatten(-1, (num_groups, group_size))
-    coefficients = base.view(1, taps, num_groups, group_size) + delta.unsqueeze(-1)
+    if output_dtype is None:
+        output_dtype = hidden_states.dtype
+    compute_dtype = (
+        torch.float32
+        if output_dtype is torch.float32 and hidden_states.dtype is torch.float16
+        else hidden_states.dtype
+    )
+    blocks = hidden_states.to(compute_dtype).unflatten(-1, (num_groups, group_size))
+    coefficients = (
+        base.to(compute_dtype).view(1, taps, num_groups, group_size)
+        + delta.to(compute_dtype).unsqueeze(-1)
+    )
     output = coefficients[:, 0] * blocks
     position = torch.arange(hidden_states.shape[0], device=hidden_states.device)
     if block_size & (block_size - 1) == 0:
@@ -40,7 +61,7 @@ def _grouped_conv(
     for tap in range(1, taps):
         shifted = F.pad(blocks[:-tap], (0, 0, 0, 0, tap, 0))
         output += coefficients[:, tap] * shifted * (position >= tap).view(-1, 1, 1)
-    return output.flatten(-2)
+    return output.flatten(-2).to(output_dtype)
 
 
 class DFlashGroupedConv(nn.Module):
@@ -77,7 +98,11 @@ class DFlashGroupedConv(nn.Module):
         )
 
     def _convolve(
-        self, hidden_states: torch.Tensor, delta: torch.Tensor, side: int
+        self,
+        hidden_states: torch.Tensor,
+        delta: torch.Tensor,
+        side: int,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         return _grouped_conv(
             hidden_states,
@@ -87,6 +112,7 @@ class DFlashGroupedConv(nn.Module):
             self.num_groups,
             self.group_size,
             self.taps,
+            output_dtype,
         )
 
     def prepare(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -96,9 +122,12 @@ class DFlashGroupedConv(nn.Module):
         return self._convolve(hidden_states, coefficients[:, 0], 0), coefficients[:, 1]
 
     def finish(
-        self, hidden_states: torch.Tensor, coefficients: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        coefficients: torch.Tensor,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
-        return self._convolve(hidden_states, coefficients, 1)
+        return self._convolve(hidden_states, coefficients, 1, output_dtype)
 
 
 class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
@@ -120,6 +149,19 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             quant_config=quant_config,
             prefix=prefix,
         )
+        self.use_sm75_transport = should_enable_dflash2_sm75(
+            config, vllm_config.model_config.dtype
+        )
+        if self.use_sm75_transport:
+            runtime_dtype = vllm_config.model_config.dtype
+            self.self_attn.output_input_scale = dflash2_sm75_residual_gain()
+            self.input_layernorm = Sm75DFlash2ResidualNorm(
+                config.hidden_size, config.rms_norm_eps, runtime_dtype
+            )
+            self.post_attention_layernorm = Sm75DFlash2ResidualNorm(
+                config.hidden_size, config.rms_norm_eps, runtime_dtype
+            )
+            self.mlp = Sm75DFlash2MLP(self.mlp)
         draft_config = config.dflash_config
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
@@ -152,12 +194,17 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
 
         hidden_states, coefficients = self.attention_conv.prepare(hidden_states)
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-        hidden_states = self.attention_conv.finish(hidden_states, coefficients)
+        residual_dtype = torch.float32 if self.use_sm75_transport else None
+        hidden_states = self.attention_conv.finish(
+            hidden_states, coefficients, residual_dtype
+        )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states, coefficients = self.mlp_conv.prepare(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = self.mlp_conv.finish(hidden_states, coefficients)
+        hidden_states = self.mlp_conv.finish(
+            hidden_states, coefficients, residual_dtype
+        )
         return hidden_states, residual
 
 
@@ -247,6 +294,15 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
             start_layer_id=start_layer_id,
             prefix=prefix,
         )
+        if self.layers and self.layers[0].use_sm75_transport:
+            runtime_dtype = vllm_config.model_config.dtype
+            self.hidden_norm = Sm75DFlash2ResidualNorm(
+                self.config.hidden_size, self.config.rms_norm_eps, runtime_dtype
+            )
+            self.norm = Sm75DFlash2ResidualNorm(
+                self.config.hidden_size, self.config.rms_norm_eps, runtime_dtype
+            )
+            logger.info("Enabled native DFlash2 BF16 transport for SM75.")
         draft_config = self.config.dflash_config
         self.input_embedding_scale = float(
             draft_config.get("input_embedding_scale", 1.0)
@@ -264,6 +320,18 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return super().embed_input_ids(input_ids) * self.input_embedding_scale
+
+    def _normalize_context_states(self, context_states: torch.Tensor) -> torch.Tensor:
+        if self.layers and self.layers[0].use_sm75_transport:
+            return self.hidden_norm(context_states)
+        return super()._normalize_context_states(context_states)
+
+    def initialize_sm75_transport(self) -> None:
+        """Finish SM75 scale setup once row-parallel weights have loaded."""
+        for layer in self.layers:
+            if layer.use_sm75_transport:
+                assert isinstance(layer.mlp, Sm75DFlash2MLP)
+                layer.mlp.initialize_down_projection_bound()
 
 
 class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
@@ -285,6 +353,11 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
         return self.candidate_logits_processor.get_top_k_tokens(
             self.lm_head, hidden_states, self.model.candidate_selector.top_k
         )
+
+    def load_weights(self, weights):
+        loaded = super().load_weights(weights)
+        self.model.initialize_sm75_transport()
+        return loaded
 
 
 EntryClass = DFlash2Qwen3ForCausalLM

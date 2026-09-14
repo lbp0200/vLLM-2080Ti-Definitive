@@ -365,7 +365,12 @@ class TurboQuantAttentionBackend(AttentionBackend):
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        return (KVCacheLayout.LBNHC,)
+        # The Triton store/decode paths consume explicit B/N/H strides after
+        # converting the logical [B, H, N, C] view to [B, N, H, C]. They can
+        # therefore also use block-compact BLHNC, which is required when this
+        # compressed target cache shares an allocator with DFlash FP16 pages
+        # of a different HNC shape.
+        return (KVCacheLayout.LBNHC, KVCacheLayout.BLHNC)
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
