@@ -120,9 +120,7 @@ the profile's quality probe.
 
 For the current migration, use the exact method and measurements in
 [the validation report](docs/2080ti-0.2.1-pre-validation.md), especially for
-TurboQuant and MTP3. Historical profile capacities are not cu130 evidence.
-INT6/AutoRound checkpoints require `humming-kernels[cu13]==0.1.13`, which is
-the version pinned by this branch; the full Minachist route remains unverified.
+TurboQuant and MTP3. 
 
 ## Hardware Target
 
