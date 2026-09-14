@@ -369,7 +369,11 @@ class TurboQuantAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [16, 32, 64, 128]
+        # The Triton store/decode kernels derive page addressing from the
+        # runtime cache shape. Hybrid Mamba models may align the manager page
+        # to their much larger state page, so accepting any 16-token multiple
+        # avoids an invalid virtual split across a padded TQ page.
+        return [MultipleOf(16)]
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:

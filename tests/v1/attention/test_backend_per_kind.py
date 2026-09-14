@@ -11,6 +11,7 @@ from vllm.model_executor.layers.attention.attention import (
     _largest_kernel_block_within,
 )
 from vllm.v1.attention.backend import AttentionType, MultipleOf
+from vllm.v1.attention.backends.turboquant_attn import TurboQuantAttentionBackend
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_spec_kind
 from vllm.v1.hisparse.runtime import ResolvedHiSparseConfig
@@ -89,6 +90,13 @@ def test_backend_per_kind_rejects_unknown_kind():
 
 def test_backend_per_kind_defaults_empty():
     assert AttentionConfig().backend_per_kind == {}
+
+
+def test_turboquant_accepts_hybrid_page_multiples():
+    supported = TurboQuantAttentionBackend.get_supported_kernel_block_sizes()
+    assert len(supported) == 1
+    assert isinstance(supported[0], MultipleOf)
+    assert supported[0].base == 16
 
 
 def test_hisparse_device_buffer_size_boundaries():
