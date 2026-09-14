@@ -11,11 +11,11 @@ from vllm.model_executor.layers.attention.attention import (
     _largest_kernel_block_within,
 )
 from vllm.v1.attention.backend import AttentionType, MultipleOf
-from vllm.v1.attention.backends.turboquant_attn import TurboQuantAttentionBackend
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.turboquant_attn import TurboQuantAttentionBackend
 from vllm.v1.attention.selector import get_attn_spec_kind
 from vllm.v1.hisparse.runtime import ResolvedHiSparseConfig
-from vllm.v1.kv_cache_interface import KVCacheSpecKind
+from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpecKind
 
 
 @pytest.mark.parametrize(
@@ -97,6 +97,13 @@ def test_turboquant_accepts_hybrid_page_multiples():
     assert len(supported) == 1
     assert isinstance(supported[0], MultipleOf)
     assert supported[0].base == 16
+
+
+def test_turboquant_supports_block_compact_mixed_page_layout():
+    assert TurboQuantAttentionBackend.supported_kv_cache_layouts() == (
+        KVCacheLayout.LBNHC,
+        KVCacheLayout.BLHNC,
+    )
 
 
 def test_hisparse_device_buffer_size_boundaries():

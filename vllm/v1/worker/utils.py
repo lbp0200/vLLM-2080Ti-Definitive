@@ -116,7 +116,7 @@ class KVBlockZeroer:
         attn_groups_iter: Iterable["AttentionGroup"],
         kernel_block_sizes: list[int],
         static_forward_context: dict[str, Any],
-        num_blocks: int,
+        num_blocks: int | Sequence[int],
         runner_only_attn_layers: set[str] | None = None,
     ) -> None:
         """Precompute the absolute-address table for the Triton zeroing kernel.
@@ -138,19 +138,20 @@ class KVBlockZeroer:
         Only AttentionSpec layers are processed; Mamba layers are skipped.
         """
         self.device = device
-        self._meta: (
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int] | None
-        ) = None
+        self._meta: dict[
+            int, tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int]
+        ] | None = None
 
         if runner_only_attn_layers is None:
             runner_only_attn_layers = set()
-        # Overlaid layers (packed layouts) share a base address but may have
-        # different page sizes; keep the widest span per address so newly
-        # allocated blocks are fully zeroed for every overlaying group.
-        seen_ptrs: dict[int, int] = {}
-        seg_addrs: list[int] = []
-        seg_block_strides: list[int] = []
-        seg_page_sizes: list[int] = []
+        # Packed layouts can overlay layers inside one group, while DFlash2
+        # gives every group its own block-ID namespace. Deduplicate addresses
+        # only inside their owning group: ID 42 in a draft pool must never
+        # zero target-pool ID 42.
+        seen_ptrs: dict[int, dict[int, int]] = {}
+        seg_addrs: dict[int, list[int]] = {}
+        seg_block_strides: dict[int, list[int]] = {}
+        seg_page_sizes: dict[int, list[int]] = {}
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
@@ -158,6 +159,11 @@ class KVBlockZeroer:
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
+            group_id = group.kv_cache_group_id
+            group_seen_ptrs = seen_ptrs.setdefault(group_id, {})
+            group_seg_addrs = seg_addrs.setdefault(group_id, [])
+            group_seg_block_strides = seg_block_strides.setdefault(group_id, [])
+            group_seg_page_sizes = seg_page_sizes.setdefault(group_id, [])
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
             assert spec.block_size % kernel_bs == 0
             for layer_name in group.layer_names:
@@ -170,11 +176,16 @@ class KVBlockZeroer:
                     continue
                 dp = kv.data_ptr()
 
-                assert kv.shape[0] % num_blocks == 0, (
-                    f"{layer_name}: {kv.shape[0]} kernel blocks is not a "
-                    f"multiple of {num_blocks} logical blocks"
+                group_num_blocks = (
+                    num_blocks[group_id]
+                    if isinstance(num_blocks, Sequence)
+                    else num_blocks
                 )
-                ratio = kv.shape[0] // num_blocks
+                assert kv.shape[0] % group_num_blocks == 0, (
+                    f"{layer_name}: {kv.shape[0]} kernel blocks is not a "
+                    f"multiple of {group_num_blocks} logical blocks"
+                )
+                ratio = kv.shape[0] // group_num_blocks
 
                 el = kv.element_size()
                 block_stride_bytes = kv.stride(0) * el
@@ -197,62 +208,87 @@ class KVBlockZeroer:
                     assert (dp + off_bytes) % 4 == 0
                     for virtual_index in range(ratio):
                         addr = dp + off_bytes + virtual_index * block_stride_bytes
-                        if (idx := seen_ptrs.get(addr)) is not None:
+                        if (idx := group_seen_ptrs.get(addr)) is not None:
                             assert (
-                                seg_block_strides[idx]
+                                group_seg_block_strides[idx]
                                 == logical_block_stride_bytes // 4
                             )
-                            seg_page_sizes[idx] = max(
-                                seg_page_sizes[idx], kernel_page_bytes // 4
+                            group_seg_page_sizes[idx] = max(
+                                group_seg_page_sizes[idx], kernel_page_bytes // 4
                             )
                             continue
-                        seen_ptrs[addr] = len(seg_addrs)
-                        seg_addrs.append(addr)
-                        seg_block_strides.append(logical_block_stride_bytes // 4)
-                        seg_page_sizes.append(kernel_page_bytes // 4)
+                        group_seen_ptrs[addr] = len(group_seg_addrs)
+                        group_seg_addrs.append(addr)
+                        group_seg_block_strides.append(
+                            logical_block_stride_bytes // 4
+                        )
+                        group_seg_page_sizes.append(kernel_page_bytes // 4)
 
-        if not seg_addrs:
+        if not any(seg_addrs.values()):
             self._meta = None
             return
 
-        max_page_size_el = max(seg_page_sizes)
-        blk_size = min(1 << (max_page_size_el - 1).bit_length(), 1024)
-        self._meta = (
-            torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
-            torch.tensor(seg_block_strides, dtype=torch.int64, device=self.device),
-            torch.tensor(seg_page_sizes, dtype=torch.int64, device=self.device),
-            (max_page_size_el + blk_size - 1) // blk_size,
-            blk_size,
-            len(seg_addrs),
-        )
+        self._meta = {}
+        for group_id, group_seg_addrs in seg_addrs.items():
+            if not group_seg_addrs:
+                continue
+            group_seg_page_sizes = seg_page_sizes[group_id]
+            max_page_size_el = max(group_seg_page_sizes)
+            blk_size = min(1 << (max_page_size_el - 1).bit_length(), 1024)
+            self._meta[group_id] = (
+                torch.tensor(
+                    group_seg_addrs, dtype=torch.uint64, device=self.device
+                ),
+                torch.tensor(
+                    seg_block_strides[group_id], dtype=torch.int64, device=self.device
+                ),
+                torch.tensor(
+                    group_seg_page_sizes, dtype=torch.int64, device=self.device
+                ),
+                (max_page_size_el + blk_size - 1) // blk_size,
+                blk_size,
+                len(group_seg_addrs),
+            )
 
-    def zero_block_ids(self, block_ids: list[int]) -> None:
+    def zero_block_ids(
+        self, block_ids: list[int], kv_cache_group_id: int | None = None
+    ) -> None:
         """Zero the KV cache memory for the given block IDs."""
         if not block_ids or self._meta is None:
             return
-        (
-            seg_addrs,
-            seg_block_strides,
-            seg_page_sizes,
-            max_chunks,
-            blk_size,
-            n_segs,
-        ) = self._meta
         n_blocks = len(block_ids)
         idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
-        grid = (n_blocks, n_segs, max_chunks)
-        _zero_kv_blocks_kernel[grid](
-            seg_addrs,
-            seg_block_strides,
-            seg_page_sizes,
-            idx,
-            BLOCK_SIZE=blk_size,
+        metas = (
+            self._meta.values()
+            if kv_cache_group_id is None
+            else (self._meta.get(kv_cache_group_id),)
         )
+        for meta in metas:
+            if meta is None:
+                continue
+            (
+                seg_addrs,
+                seg_block_strides,
+                seg_page_sizes,
+                max_chunks,
+                blk_size,
+                n_segs,
+            ) = meta
+            grid = (n_blocks, n_segs, max_chunks)
+            _zero_kv_blocks_kernel[grid](
+                seg_addrs,
+                seg_block_strides,
+                seg_page_sizes,
+                idx,
+                BLOCK_SIZE=blk_size,
+            )
 
     def warmup(self, num_kv_blocks: int) -> None:
         """JIT-compile the zeroing kernel before the first real request."""
         if num_kv_blocks > 0:
-            self.zero_block_ids([0])
+            if self._meta is not None:
+                for group_id in self._meta:
+                    self.zero_block_ids([0], group_id)
 
 
 @dataclass

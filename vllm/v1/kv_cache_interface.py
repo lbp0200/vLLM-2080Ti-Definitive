@@ -1428,6 +1428,20 @@ class KVCacheConfig:
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
+    independent_block_pools: bool = False
+    """Whether every KV-cache group owns an independent block-ID namespace.
+
+    The worker can still place all groups in one CUDA allocation. In that
+    case the tensors occupy non-overlapping regions of the shared backing
+    buffer, while the scheduler assigns block IDs independently per group.
+    """
+    num_blocks_per_group: tuple[int, ...] | None = None
+    """Physical block capacity for each KV-cache group.
+
+    ``None`` preserves the legacy shared-capacity behavior.  Independent
+    pools use this tuple to keep small draft/local-attention pools from
+    reserving the target model's full context capacity.
+    """
     prefix_cache_retention_interval: int | None = None
     """Resolved retention policy for local prefix-cache checkpoints."""
     kv_cache_layout: str | None = None
@@ -1488,9 +1502,18 @@ class KVCacheConfig:
     def num_blocks_of(self, tensor: KVCacheTensor) -> int:
         """Number of blocks addressable by the pool backing ``tensor``."""
         if not tensor.host_resident:
+            for group_id, group in enumerate(self.kv_cache_groups):
+                if any(layer_name in group.layer_names for layer_name in tensor.layers):
+                    return self.num_blocks_for_group(group_id)
             return self.num_blocks
         assert self.hisparse_host_num_blocks is not None
         return self.hisparse_host_num_blocks
+
+    def num_blocks_for_group(self, group_id: int) -> int:
+        """Return the physical block capacity assigned to ``group_id``."""
+        if self.num_blocks_per_group is None:
+            return self.num_blocks
+        return self.num_blocks_per_group[group_id]
 
     @property
     def has_mamba_layers(self) -> bool:

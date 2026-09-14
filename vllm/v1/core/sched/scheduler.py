@@ -347,7 +347,10 @@ class Scheduler(SchedulerInterface):
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
         # Blocks that async KV loads will overwrite this step, skipped from
         # zeroing since the zeroing could race the out-of-band write.
-        self._skip_zero_block_ids: set[int] = set()
+        # Independent DFlash2 pools reuse numeric block IDs per KV group. Keep
+        # the connector skip list in the same shape as the worker zeroing
+        # payload so IDs from one pool cannot suppress zeroing in another.
+        self._skip_zero_block_ids: set[int] | dict[int, set[int]] = set()
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
@@ -1328,13 +1331,27 @@ class Scheduler(SchedulerInterface):
                     if self.needs_kv_cache_zeroing:
                         # Skip zeroing of the blocks the async load will
                         # overwrite; the zeroing could race the write.
-                        self._skip_zero_block_ids.update(
+                        skip_ids = (
                             self.kv_cache_manager.get_zeroing_block_ids_in_range(
                                 request.request_id,
                                 num_new_local_computed_tokens,
                                 num_computed_tokens,
                             )
                         )
+                        if isinstance(skip_ids, dict):
+                            if not isinstance(self._skip_zero_block_ids, dict):
+                                self._skip_zero_block_ids = {}
+                            for group_id, ids in skip_ids.items():
+                                self._skip_zero_block_ids.setdefault(group_id, set()).update(
+                                    ids
+                                )
+                        else:
+                            if isinstance(self._skip_zero_block_ids, dict):
+                                self._skip_zero_block_ids.setdefault(0, set()).update(
+                                    skip_ids
+                                )
+                            else:
+                                self._skip_zero_block_ids.update(skip_ids)
                     continue
 
                 self.running.append(request)
@@ -1559,7 +1576,9 @@ class Scheduler(SchedulerInterface):
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
 
-    def _get_new_block_ids_to_zero(self) -> list[int] | None:
+    def _get_new_block_ids_to_zero(
+        self,
+    ) -> list[int] | dict[int, list[int]] | None:
         # Drain new attention block ids every step so the manager-side list
         # does not grow unbounded; only kv-cache zeroing consumes them.
         new_block_ids_to_zero = self.kv_cache_manager.take_new_block_ids()
@@ -1568,7 +1587,33 @@ class Scheduler(SchedulerInterface):
 
         if self._skip_zero_block_ids:
             skip = self._skip_zero_block_ids
-            new_block_ids_to_zero = [b for b in new_block_ids_to_zero if b not in skip]
+            if isinstance(new_block_ids_to_zero, dict):
+                if isinstance(skip, dict):
+                    new_block_ids_to_zero = {
+                        group_id: [
+                            block_id
+                            for block_id in block_ids
+                            if block_id not in skip.get(group_id, set())
+                        ]
+                        for group_id, block_ids in new_block_ids_to_zero.items()
+                    }
+                else:
+                    # A legacy connector has no group information. Applying
+                    # its IDs to every pool preserves the old behavior.
+                    new_block_ids_to_zero = {
+                        group_id: [block_id for block_id in block_ids if block_id not in skip]
+                        for group_id, block_ids in new_block_ids_to_zero.items()
+                    }
+            elif isinstance(skip, dict):
+                new_block_ids_to_zero = [
+                    block_id
+                    for block_id in new_block_ids_to_zero
+                    if all(block_id not in ids for ids in skip.values())
+                ]
+            else:
+                new_block_ids_to_zero = [
+                    block_id for block_id in new_block_ids_to_zero if block_id not in skip
+                ]
             skip.clear()
 
         return new_block_ids_to_zero or None
