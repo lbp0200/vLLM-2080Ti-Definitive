@@ -13,3 +13,13 @@ ABI 匹配 PCIe custom all-reduce 扩展。
 | `qwen27b/w8a16/normal/nomtp-fp16kv-1x256k-text-image.env` | normal | FP16 | no MTP | text+image |
 
 性能和质量证据见[历史验证记录](../../docs/2080ti-0.2.1-pre-validation.md)。
+
+## 完整测量数据
+
+| Profile | 模式 | 上下文 | KV | MTP | 消息 | GPU KV tokens | 性能 |
+|---|---|---:|---|---:|---|---:|---:|
+| `qwen27b/w8a16/normal/nomtp-fp16kv-1x256k-text-image.env` | normal | 256K | FP16 | 0 | text+image | 351,319 | 1065.22 / 51.65 |
+| `qwen27b/w8a16/normal/mtp-fp16kv-1x256k-text-image.env` | normal | 256K | FP16 | 3 | text+image | 312,585 | 1440.31 / 73.68 |
+| `qwen27b/w8a16/fast/mtp-tqk8v4-1x256k-text-image.env` | fast | 256K | TQK8V4 | 3 | text+image | 780,814 | 1692.12 / 104.78 |
+
+数据来自四张 16 GiB Tesla T10（PCIe、TP=4），使用 ABI 匹配的 PCIe CAR 扩展。所有路线均通过启动和图像请求，性能为三个独立 4K/128 请求的中位数。
