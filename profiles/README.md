@@ -69,7 +69,8 @@ visual-answer accuracy.
 
 | Profile | Mode | Context | KV | MTP | Messages | GPU KV tokens | Performance |
 |---|---|---:|---|---:|---|---:|---:|
-| `2x2080Ti/qwen27b/w4a16/fast/dflash2-tqk8v4-256K-text-only.env` | fast | 256K | TQK8V4 | DFlash2/7 | text-only | pending | pending |
+| `2x2080Ti/qwen27b/w4a16/fast/dflash2-tqk8v4-172K-2x-text-only.env` | fast | 172K x2 | TQK8V4 | DFlash2/7 | text-only | 369,439 | validated |
+| `2x2080Ti/qwen27b/w4a16/fast/dflash2-tqk8v4-256K-1x-text-image.env` | fast | 256K x1 | TQK8V4 | DFlash2/7 | text+image | 318,010 | validated |
 | `2x2080Ti/qwen27b/w4a16/normal/fp8kv-240K-mtp3-text-only.env` | normal | 240K | FP8 | 3 | text-only | 463,890 | 1433.2 / 76.8 |
 | `2x2080Ti/qwen27b/w4a16/normal/fp8kv-240K-mtp3-text-image.env` | normal | 240K | FP8 | 3 | text+image | 426,080 | 1250.6 / 52.5 |
 | `2x2080Ti/qwen27b/w4a16/normal/fp8kv-192K-nomtp-text-only.env` | normal | 192K | FP8 | 0 | text-only | 518,191 | 1372.1 / 42.0 |

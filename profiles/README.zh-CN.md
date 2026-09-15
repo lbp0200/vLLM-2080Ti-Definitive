@@ -62,7 +62,8 @@ SM75 上使用 FlashInfer FA2。fast FP16 MTP3 候选未列在下表：其 full-
 
 | Profile | 启动模式 | 上下文 | KV | MTP | 消息 | GPU KV tokens | 性能 |
 |---|---|---:|---|---:|---|---:|---:|
-| `2x2080Ti/qwen27b/w4a16/fast/dflash2-tqk8v4-256K-text-only.env` | fast | 256K | TQK8V4 | DFlash2/7 | text-only | 待测 | 待测 |
+| `2x2080Ti/qwen27b/w4a16/fast/dflash2-tqk8v4-172K-2x-text-only.env` | fast | 172K x2 | TQK8V4 | DFlash2/7 | text-only | 369,439 | 已验证 |
+| `2x2080Ti/qwen27b/w4a16/fast/dflash2-tqk8v4-256K-1x-text-image.env` | fast | 256K x1 | TQK8V4 | DFlash2/7 | text+image | 318,010 | 已验证 |
 | `2x2080Ti/qwen27b/w4a16/normal/fp8kv-240K-mtp3-text-only.env` | normal | 240K | FP8 | 3 | text-only | 463,890 | 1433.2 / 76.8 |
 | `2x2080Ti/qwen27b/w4a16/normal/fp8kv-240K-mtp3-text-image.env` | normal | 240K | FP8 | 3 | text+image | 426,080 | 1250.6 / 52.5 |
 | `2x2080Ti/qwen27b/w4a16/normal/fp8kv-192K-nomtp-text-only.env` | normal | 192K | FP8 | 0 | text-only | 518,191 | 1372.1 / 42.0 |
