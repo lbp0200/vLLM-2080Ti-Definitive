@@ -121,6 +121,95 @@ validate_max_jobs_range() {
   fi
 }
 
+configure_build_parallelism() {
+  local answer
+  [[ "$max_jobs_source" == auto* ]] || return 0
+  if [[ "${ASSUME_YES:-0}" == "1" || "${YES:-0}" == "1" || ! -t 0 ]]; then
+    return 0
+  fi
+
+  cat <<EOF
+
+Build thread selection:
+  CPU threads detected: $cpu_threads
+  Recommended build threads: $max_jobs
+  Allowed range: 1-$cpu_threads
+
+Press Enter to use the recommended value, or type a build thread count:
+EOF
+  while true; do
+    read -r answer
+    if [[ -z "$answer" ]]; then
+      return 0
+    fi
+    if is_positive_integer "$answer" && (( answer <= cpu_threads )); then
+      max_jobs=$answer
+      max_jobs_source=manual-prompt
+      return 0
+    fi
+    echo "Please enter a number from 1 to $cpu_threads, or press Enter for $max_jobs:"
+  done
+}
+
+prompt_yes_no_timeout() {
+  local prompt=$1 timeout_seconds=${2:-10} default_answer=${3:-y} answer=""
+  if [[ "${ASSUME_YES:-0}" == "1" || "${YES:-0}" == "1" || ! -t 0 ]]; then
+    printf '%s\n' "$default_answer"
+    return 0
+  fi
+  printf '%s ' "$prompt" >&2
+  if read -r -t "$timeout_seconds" answer; then
+    case "$answer" in
+      y|Y|yes|YES) printf 'y\n' ;;
+      n|N|no|NO) printf 'n\n' ;;
+      *) printf '%s\n' "$default_answer" ;;
+    esac
+  else
+    printf '%s\n' "$default_answer"
+  fi
+}
+
+confirm_mirror_route() {
+  local answer
+  [[ -n "$git_mirror_prefix" || "$UV_INDEX_URL" != "$BUILD_PYPI_OFFICIAL_INDEX" ]] || return 0
+  answer=$(prompt_yes_no_timeout \
+    "Preflight selected third-party download mirrors. Continue? [Y/n]:" 10 y)
+  [[ "$answer" != "n" ]] || fail "Build cancelled by user."
+}
+
+confirm_install() {
+  local answer
+  if [[ "${ASSUME_YES:-0}" == "1" || "${YES:-0}" == "1" || ! -t 0 ]]; then
+    return 0
+  fi
+  cat <<EOF
+
+This script will build and install vLLM 2080 Ti Definitive Edition into:
+  $venv_dir
+
+Build configuration:
+  CUDA: $PRIMARY_CUDA_VERSION ($CUDA_HOME)
+  Python: $python_version
+  Build threads: $max_jobs ($max_jobs_source)
+  PyPI index: $UV_INDEX_URL
+  Git route: ${git_mirror_prefix:-https://github.com/}
+
+It will download Python/CUDA dependencies, compile CUDA extensions, and write
+logs under:
+  $LOG_DIR
+
+Continue? [y/N]:
+EOF
+  while true; do
+    read -r answer
+    case "$answer" in
+      y|Y) return 0 ;;
+      n|N|"") echo "Build cancelled."; exit 0 ;;
+      *) echo "Please type y to continue or n to exit:" ;;
+    esac
+  done
+}
+
 cuda_backend="cu$(printf '%s' "$PRIMARY_CUDA_VERSION" | cut -d. -f1,2 | tr -d '.')"
 cpu_threads=${CPU_THREADS:-$(detect_cpu_threads)}
 memory_gb=${MEMORY_GB:-$(detect_memory_gb)}
@@ -154,7 +243,8 @@ require_primary_env=${REQUIRE_PRIMARY_ENV:-1}
 python_version=${PYTHON_VERSION:-$PRIMARY_PYTHON_VERSION}
 venv_dir=${VENV_DIR:-"$ROOT/.venv"}
 python_bin="$venv_dir/bin/python"
-git_mirror_prefix=${BUILD_GIT_MIRROR_PREFIX:-}
+configured_git_mirror_prefix=${BUILD_GIT_MIRROR_PREFIX:-}
+git_mirror_prefix=$configured_git_mirror_prefix
 flashqla_repo=${FLASHQLA_REPO:-https://github.com/weicj/FlashQLA-SM70-SM75.git}
 flashqla_dir=${FLASHQLA_DIR:-"$ROOT/.deps/FlashQLA-SM70-SM75"}
 flashqla_enabled=${FLASHQLA_ENABLED:-1}
@@ -169,55 +259,92 @@ BUILD_TORCH_INDEX=${BUILD_TORCH_INDEX:-}
 BUILD_GIT_FOREIGN_REPO_PREFIX=${BUILD_GIT_FOREIGN_REPO_PREFIX:-https://gh-proxy.com/}
 BUILD_GIT_DOMESTIC_REPO_PREFIX=${BUILD_GIT_DOMESTIC_REPO_PREFIX:-https://ghfast.top/}
 BUILD_PREFLIGHT_SAMPLE_TIMEOUT_SECONDS=${BUILD_PREFLIGHT_SAMPLE_TIMEOUT_SECONDS:-5}
+BUILD_PREFLIGHT_TRANSFER_SECONDS=${BUILD_PREFLIGHT_TRANSFER_SECONDS:-5}
 
 validate_max_jobs_range "$max_jobs" "$cpu_threads"
 is_positive_integer "$flashqla_clone_timeout" || fail "FLASHQLA_CLONE_TIMEOUT must be a positive integer."
+is_positive_integer "$BUILD_PREFLIGHT_TRANSFER_SECONDS" || fail "BUILD_PREFLIGHT_TRANSFER_SECONDS must be a positive integer."
 [[ "$skip_vllm_build" == "0" || "$skip_vllm_build" == "1" ]] ||
   fail "SKIP_VLLM_BUILD must be 0 or 1."
 require_command uv
 
 measure_network_url_ms() {
-  local url=$1 timeout=${2:-5} start end
-  start=$(date +%s%3N 2>/dev/null || date +%s000)
+  local url=$1 timeout=${2:-5} elapsed
   if command -v curl >/dev/null 2>&1; then
-    curl -L --fail --silent --show-error --connect-timeout "$timeout" --max-time "$timeout" -o /dev/null "$url" || return 1
+    elapsed=$(curl -L --fail --silent --show-error \
+      --connect-timeout "$timeout" --max-time "$timeout" \
+      -o /dev/null -w '%{time_total}' "$url") || return 1
+    awk -v seconds="$elapsed" 'BEGIN { printf "%d\n", seconds * 1000 }'
+    return 0
   elif command -v wget >/dev/null 2>&1; then
+    local start end
+    start=$(python3 -c 'import time; print(time.monotonic_ns())')
     wget -q --timeout="$timeout" -O /dev/null "$url" || return 1
+    end=$(python3 -c 'import time; print(time.monotonic_ns())')
+    printf '%s\n' "$(((end - start) / 1000000))"
+    return 0
   else
     return 1
   fi
-  end=$(date +%s%3N 2>/dev/null || date +%s000)
-  printf '%s\n' "$((end - start))"
+}
+
+pep440_version() {
+  sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+[^-]*)-([0-9]+)-g([0-9a-f]+)$/\1+\2.g\3/' <<<"$1"
+}
+
+measure_network_url_bytes() {
+  local url=$1 timeout=${2:-5} bytes
+  command -v curl >/dev/null 2>&1 || {
+    echo 0
+    return 0
+  }
+  bytes=$(curl -L --silent --connect-timeout "$timeout" --max-time "$timeout" \
+    -o /dev/null -w '%{size_download}' "$url" 2>/dev/null || true)
+  [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0
+  echo "$bytes"
 }
 
 run_build_network_preflight() {
   local -a modes=(official foreign domestic) pypi_urls=("$BUILD_PYPI_OFFICIAL_INDEX" "$BUILD_PYPI_FOREIGN_INDEX" "$BUILD_PYPI_DOMESTIC_INDEX")
   local -a prefixes=("" "$BUILD_GIT_FOREIGN_REPO_PREFIX" "$BUILD_GIT_DOMESTIC_REPO_PREFIX")
-  local best_mode=official best_total=999999999 mode pypi_probe git_probe pypi_ms git_ms total i
+  local best_pypi_mode=official best_pypi_ms=999999999 best_git_mode=official best_git_bytes=-1
+  local mode pypi_probe git_probe git_transfer_probe pypi_ms git_ms git_bytes i
   echo "Build preflight: benchmarking PyPI and Git routes..."
   for i in 0 1 2; do
     mode=${modes[$i]}; pypi_probe=${pypi_urls[$i]%/}/pip/
     git_probe="${prefixes[$i]}${flashqla_repo}/info/refs?service=git-upload-pack"
+    git_transfer_probe="${prefixes[$i]}https://github.com/nvidia/cutlass/archive/refs/tags/v4.7.1.tar.gz"
     pypi_ms=$(measure_network_url_ms "$pypi_probe" "$BUILD_PREFLIGHT_SAMPLE_TIMEOUT_SECONDS" || echo 999999)
     git_ms=$(measure_network_url_ms "$git_probe" "$BUILD_PREFLIGHT_SAMPLE_TIMEOUT_SECONDS" || echo 999999)
-    total=$((pypi_ms + git_ms))
-    echo "Build preflight: $mode PyPI=${pypi_ms}ms Git=${git_ms}ms total=${total}ms"
-    if (( total < best_total )); then best_total=$total; best_mode=$mode; fi
+    git_bytes=$(measure_network_url_bytes "$git_transfer_probe" "$BUILD_PREFLIGHT_TRANSFER_SECONDS")
+    echo "Build preflight: $mode PyPI=${pypi_ms}ms Git=${git_ms}ms Git-transfer=${git_bytes}B/${BUILD_PREFLIGHT_TRANSFER_SECONDS}s"
+    if (( pypi_ms < best_pypi_ms )); then best_pypi_ms=$pypi_ms; best_pypi_mode=$mode; fi
+    if (( git_bytes > best_git_bytes )); then best_git_bytes=$git_bytes; best_git_mode=$mode; fi
   done
-  case "$best_mode" in
-    official) export UV_INDEX_URL="$BUILD_PYPI_OFFICIAL_INDEX"; git_mirror_prefix="" ;;
-    foreign) export UV_INDEX_URL="$BUILD_PYPI_FOREIGN_INDEX"; git_mirror_prefix="$BUILD_GIT_FOREIGN_REPO_PREFIX" ;;
+  case "$best_pypi_mode" in
+    official) export UV_INDEX_URL="$BUILD_PYPI_OFFICIAL_INDEX" ;;
+    foreign) export UV_INDEX_URL="$BUILD_PYPI_FOREIGN_INDEX" ;;
     domestic)
       export UV_INDEX_URL="$BUILD_PYPI_DOMESTIC_INDEX"
       BUILD_TORCH_INDEX=${BUILD_TORCH_INDEX:-$BUILD_TORCH_DOMESTIC_INDEX}
-      git_mirror_prefix="$BUILD_GIT_DOMESTIC_REPO_PREFIX"
       ;;
   esac
+  if [[ -n "$configured_git_mirror_prefix" ]]; then
+    git_mirror_prefix=$configured_git_mirror_prefix
+  else
+    case "$best_git_mode" in
+      official) git_mirror_prefix="" ;;
+      foreign) git_mirror_prefix="$BUILD_GIT_FOREIGN_REPO_PREFIX" ;;
+      domestic) git_mirror_prefix="$BUILD_GIT_DOMESTIC_REPO_PREFIX" ;;
+    esac
+  fi
   export BUILD_GIT_MIRROR_PREFIX="$git_mirror_prefix"
   if [[ -n "$git_mirror_prefix" ]]; then
     export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.${git_mirror_prefix}https://github.com/.insteadOf" GIT_CONFIG_VALUE_0="https://github.com/"
   fi
-  echo "Build preflight: selected $best_mode route (UV_INDEX_URL=$UV_INDEX_URL)"
+  echo "Build preflight: selected $best_pypi_mode package route (UV_INDEX_URL=$UV_INDEX_URL)"
+  echo "Build preflight: Git route=${git_mirror_prefix:-https://github.com/}"
+  confirm_mirror_route
 }
 
 install_torch_from_mirror() {
@@ -228,6 +355,14 @@ install_torch_from_mirror() {
     --index-strategy unsafe-best-match \
     "torch==${PRIMARY_TORCH_VERSION}+${cuda_backend}" \
     "triton==3.7.1"
+}
+
+install_vllm_build_tools() {
+  echo "Installing vLLM build tools from $UV_INDEX_URL"
+  uv pip install --python "$python_bin" \
+    "cmake>=3.26.1" ninja "packaging>=24.2" \
+    "setuptools>=77.0.3,<81.0.0" "setuptools-scm>=8.0" \
+    "setuptools-rust>=1.9.0" wheel "jinja2>=3.1.6"
 }
 
 if [[ ! -f pyproject.toml || ! -d vllm ]]; then
@@ -354,6 +489,8 @@ PY
   export PYTHONPATH="$flashqla_dir${PYTHONPATH:+:$PYTHONPATH}"
 }
 
+configure_build_parallelism
+
 echo "============================================================"
 echo "vLLM 2080 Ti Definitive Edition ${FORK_RELEASE} source build"
 echo "Upstream base: vLLM ${BASE_VLLM_VERSION}"
@@ -365,6 +502,7 @@ echo "============================================================"
 check_primary_host
 check_cuda_glibc_compatibility
 run_build_network_preflight
+confirm_install
 
 export MAX_JOBS="$max_jobs"
 export BUILD_MAX_JOBS=${BUILD_MAX_JOBS:-$MAX_JOBS}
@@ -386,8 +524,9 @@ fi
 # file points at unavailable metadata, has no usable SCM information. Keep
 # the package version deterministic in both supported validation layouts.
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  export VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-$BASE_VLLM_VERSION}"
-  export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM:-$BASE_VLLM_VERSION}"
+  snapshot_version=$(pep440_version "$BASE_VLLM_VERSION")
+  export VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-$snapshot_version}"
+  export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM:-$snapshot_version}"
 fi
 
 if [[ ! -x "$python_bin" ]]; then
@@ -408,8 +547,9 @@ if [[ "$skip_vllm_build" == "1" ]]; then
   echo "Skipping vLLM build (SKIP_VLLM_BUILD=1); validating existing editable install"
 else
   install_torch_from_mirror
+  install_vllm_build_tools
   echo "Installing and compiling vLLM with uv torch backend $cuda_backend"
-  uv pip install --python "$python_bin" -e "." "--torch-backend=$cuda_backend"
+  uv pip install --python "$python_bin" --no-build-isolation -e "." "--torch-backend=$cuda_backend"
 fi
 
 "$python_bin" tools/patch_torch_inductor_e8m0.py
