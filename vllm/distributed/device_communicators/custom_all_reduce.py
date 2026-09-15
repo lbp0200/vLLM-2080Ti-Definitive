@@ -109,7 +109,7 @@ from vllm.distributed.utils import is_weak_contiguous  # noqa: E402
 
 
 class CustomAllreduce:
-    _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8, 16]
+    _SUPPORTED_WORLD_SIZES = list(range(2, 17))
     _DEFAULT_ALL_GATHER_MAX_SIZE = 2 * 1024 * 1024
     _DEFAULT_MNNVL_ALL_GATHER_MAX_SIZES = {
         2: 8 * 1024 * 1024,
@@ -237,13 +237,6 @@ class CustomAllreduce:
             physical_device_ids = [t.item() for t in gather_list]
             assert current_platform.is_cuda_alike()
             fully_connected = current_platform.is_fully_connected(physical_device_ids)
-        if same_node and world_size > 2 and not fully_connected:
-            logger.warning(
-                "Custom allreduce is disabled because it's not supported on"
-                " more than two PCIe-only GPUs. To silence this warning, "
-                "specify disable_custom_all_reduce=True explicitly."
-            )
-            return
         # test P2P capability, this checks software/cudaruntime support
         # this is expensive to compute at the first time
         # then we cache the result
@@ -292,17 +285,22 @@ class CustomAllreduce:
         self.max_size = max_size
         self.max_all_gather_size = max_all_gather_size
         if max_mnnvl_all_gather_size is None:
-            max_mnnvl_all_gather_size = self._DEFAULT_MNNVL_ALL_GATHER_MAX_SIZES[
-                world_size
-            ]
+            max_mnnvl_all_gather_size = self._DEFAULT_MNNVL_ALL_GATHER_MAX_SIZES.get(
+                world_size, self._DEFAULT_ALL_GATHER_MAX_SIZE
+            )
         self.max_mnnvl_all_gather_size = max_mnnvl_all_gather_size
         self.max_reduce_scatter_size = max_reduce_scatter_size
         self.max_mnnvl_reduce_scatter_size = max_mnnvl_reduce_scatter_size
         self.rank = rank
         self.world_size = world_size
         self.fully_connected = fully_connected
+        self.same_node = same_node
         self._ptr = ops.init_custom_ar(
-            self.meta_ptrs, self.rank_data, rank, self.fully_connected
+            self.meta_ptrs,
+            self.rank_data,
+            rank,
+            self.fully_connected,
+            self.same_node,
         )
         ops.register_buffer(self._ptr, self.buffer_ptrs)
         self._init_mnnvl_buffer(
@@ -407,7 +405,7 @@ class CustomAllreduce:
         ops.register_graph_buffers(self._ptr, handles, offsets)
 
     def should_custom_ar(self, inp: torch.Tensor):
-        if self.disabled or self.world_size > 8:
+        if self.disabled:
             return False
         if inp.dtype not in (torch.float32, torch.float16, torch.bfloat16):
             return False
@@ -417,11 +415,7 @@ class CustomAllreduce:
             return False
         if not is_weak_contiguous(inp):
             return False
-        # for 4 or more non NVLink-capable GPUs, custom allreduce provides
-        # little performance improvement over NCCL.
-        if self.world_size == 2 or self.fully_connected:
-            return inp_size < self.max_size
-        return False
+        return inp_size < self.max_size
 
     def all_reduce(
         self, inp: torch.Tensor, *, out: torch.Tensor = None, registered: bool = False

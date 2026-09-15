@@ -84,6 +84,10 @@ class CustomAllreduce {
   int world_size_;
   // Full NVLink or xGMI connection between GPUs.
   bool fully_connected_;
+  // All ranks are on the same host and have passed the P2P qualification.
+  // This is separate from fully_connected_: PCIe-only groups are not fully
+  // connected, but can still safely use the one-stage IPC kernel.
+  bool same_node_;
 
   RankSignals sg_;
   // Stores a map from a pointer to its peer pointers from all ranks.
@@ -123,10 +127,12 @@ class CustomAllreduce {
    * are passed in from the constructor.
    */
   CustomAllreduce(Signal** signals, void* rank_data, size_t rank_data_sz,
-                  int rank, int world_size, bool fully_connected = true)
+                  int rank, int world_size, bool fully_connected = true,
+                  bool same_node = true)
       : rank_(rank),
         world_size_(world_size),
         fully_connected_(fully_connected),
+        same_node_(same_node),
         self_sg_(signals[rank]),
         d_rank_data_base_(reinterpret_cast<RankData*>(rank_data)),
         d_rank_data_end_(d_rank_data_base_ + rank_data_sz / sizeof(RankData)) {
@@ -285,40 +291,54 @@ class CustomAllreduce {
       }
     }
 
+    // One-stage directly reads every peer's full input, which is faster for
+    // very small payloads. Two-stage limits each rank's reduction to its shard
+    // and avoids saturating PCIe on larger payloads. PCIe thresholds are kept
+    // separate from the existing fully-connected thresholds: on four SM75
+    // PCIe GPUs, two-stage is already faster from 32 KiB onwards.
+    const bool auto_use_1stage =
+        world_size_ == 2 ||
+        (fully_connected_ && ((world_size_ <= 4 && bytes < 512 * 1024) ||
+                              (world_size_ <= 8 && bytes < 256 * 1024))) ||
+        (same_node_ && !fully_connected_ && world_size_ <= 4 &&
+         bytes < 32 * 1024);
+
 #define KL(ngpus, name)                                                       \
   name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, \
                                                  rank_, size);
-#define REDUCE_CASE(ngpus)                              \
-  case ngpus: {                                         \
-    if (force_1stage) {                                 \
-      KL(ngpus, cross_device_reduce_1stage);            \
-    } else if (force_2stage) {                          \
-      KL(ngpus, cross_device_reduce_2stage);            \
-    } else {                                            \
-      if (world_size_ == 2) {                           \
-        KL(ngpus, cross_device_reduce_1stage);          \
-      } else if (fully_connected_) {                    \
-        if ((world_size_ <= 4 && bytes < 512 * 1024) || \
-            (world_size_ <= 8 && bytes < 256 * 1024)) { \
-          KL(ngpus, cross_device_reduce_1stage);        \
-        } else {                                        \
-          KL(ngpus, cross_device_reduce_2stage);        \
-        }                                               \
-      }                                                 \
-    }                                                   \
-    break;                                              \
+#define REDUCE_CASE(ngpus)                   \
+  case ngpus: {                              \
+    if (force_1stage) {                      \
+      KL(ngpus, cross_device_reduce_1stage); \
+    } else if (force_2stage) {               \
+      KL(ngpus, cross_device_reduce_2stage); \
+    } else if (auto_use_1stage) {            \
+      KL(ngpus, cross_device_reduce_1stage); \
+    } else {                                 \
+      KL(ngpus, cross_device_reduce_2stage); \
+    }                                        \
+    break;                                   \
   }
 
     switch (world_size_) {
       REDUCE_CASE(2)
+      REDUCE_CASE(3)
       REDUCE_CASE(4)
+      REDUCE_CASE(5)
       REDUCE_CASE(6)
+      REDUCE_CASE(7)
       REDUCE_CASE(8)
+      REDUCE_CASE(9)
+      REDUCE_CASE(10)
+      REDUCE_CASE(11)
+      REDUCE_CASE(12)
+      REDUCE_CASE(13)
+      REDUCE_CASE(14)
+      REDUCE_CASE(15)
+      REDUCE_CASE(16)
       default:
         throw std::runtime_error(
-            "custom allreduce only supports num gpus in (2,4,6,8). Actual "
-            "num "
-            "gpus = " +
+            "custom allreduce only supports 2 to 16 GPUs. Actual num GPUs = " +
             std::to_string(world_size_));
     }
 #undef REDUCE_CASE
