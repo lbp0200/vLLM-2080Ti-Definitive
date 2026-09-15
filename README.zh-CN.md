@@ -71,7 +71,6 @@ RTX 2080 Ti、TP=2，以及四张 Tesla T10、TP=4。其他并行布局可用于
 ```bash
 git clone https://github.com/weicj/vLLM-2080Ti-Definitive.git
 cd vLLM-2080Ti-Definitive
-git switch --track origin/vllm-2080ti-definitive-0.2.x
 ./build.sh
 ```
 

@@ -78,7 +78,6 @@ are listed in the [Profile Guide](profiles/README.md).
 ```bash
 git clone https://github.com/weicj/vLLM-2080Ti-Definitive.git
 cd vLLM-2080Ti-Definitive
-git switch --track origin/vllm-2080ti-definitive-0.2.x
 ./build.sh
 ```
 
