@@ -164,6 +164,8 @@ skip_vllm_build=${SKIP_VLLM_BUILD:-0}
 BUILD_PYPI_OFFICIAL_INDEX=${BUILD_PYPI_OFFICIAL_INDEX:-https://pypi.org/simple}
 BUILD_PYPI_FOREIGN_INDEX=${BUILD_PYPI_FOREIGN_INDEX:-https://pypi.python.org/simple}
 BUILD_PYPI_DOMESTIC_INDEX=${BUILD_PYPI_DOMESTIC_INDEX:-https://mirrors.aliyun.com/pypi/simple}
+BUILD_TORCH_DOMESTIC_INDEX=${BUILD_TORCH_DOMESTIC_INDEX:-https://mirror.sjtu.edu.cn/pytorch-wheels/cu130/}
+BUILD_TORCH_INDEX=${BUILD_TORCH_INDEX:-}
 BUILD_GIT_FOREIGN_REPO_PREFIX=${BUILD_GIT_FOREIGN_REPO_PREFIX:-https://gh-proxy.com/}
 BUILD_GIT_DOMESTIC_REPO_PREFIX=${BUILD_GIT_DOMESTIC_REPO_PREFIX:-https://ghfast.top/}
 BUILD_PREFLIGHT_SAMPLE_TIMEOUT_SECONDS=${BUILD_PREFLIGHT_SAMPLE_TIMEOUT_SECONDS:-5}
@@ -176,7 +178,7 @@ require_command uv
 
 measure_network_url_ms() {
   local url=$1 timeout=${2:-5} start end
-  start=$(date +%s)
+  start=$(date +%s%3N 2>/dev/null || date +%s000)
   if command -v curl >/dev/null 2>&1; then
     curl -L --fail --silent --show-error --connect-timeout "$timeout" --max-time "$timeout" -o /dev/null "$url" || return 1
   elif command -v wget >/dev/null 2>&1; then
@@ -184,8 +186,8 @@ measure_network_url_ms() {
   else
     return 1
   fi
-  end=$(date +%s)
-  printf '%s\n' "$(((end - start) * 1000))"
+  end=$(date +%s%3N 2>/dev/null || date +%s000)
+  printf '%s\n' "$((end - start))"
 }
 
 run_build_network_preflight() {
@@ -205,13 +207,27 @@ run_build_network_preflight() {
   case "$best_mode" in
     official) export UV_INDEX_URL="$BUILD_PYPI_OFFICIAL_INDEX"; git_mirror_prefix="" ;;
     foreign) export UV_INDEX_URL="$BUILD_PYPI_FOREIGN_INDEX"; git_mirror_prefix="$BUILD_GIT_FOREIGN_REPO_PREFIX" ;;
-    domestic) export UV_INDEX_URL="$BUILD_PYPI_DOMESTIC_INDEX"; git_mirror_prefix="$BUILD_GIT_DOMESTIC_REPO_PREFIX" ;;
+    domestic)
+      export UV_INDEX_URL="$BUILD_PYPI_DOMESTIC_INDEX"
+      BUILD_TORCH_INDEX=${BUILD_TORCH_INDEX:-$BUILD_TORCH_DOMESTIC_INDEX}
+      git_mirror_prefix="$BUILD_GIT_DOMESTIC_REPO_PREFIX"
+      ;;
   esac
   export BUILD_GIT_MIRROR_PREFIX="$git_mirror_prefix"
   if [[ -n "$git_mirror_prefix" ]]; then
     export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.${git_mirror_prefix}https://github.com/.insteadOf" GIT_CONFIG_VALUE_0="https://github.com/"
   fi
   echo "Build preflight: selected $best_mode route (UV_INDEX_URL=$UV_INDEX_URL)"
+}
+
+install_torch_from_mirror() {
+  [[ -n "$BUILD_TORCH_INDEX" ]] || return 0
+  echo "Installing Torch/Triton from mirror: $BUILD_TORCH_INDEX"
+  uv pip install --python "$python_bin" \
+    --index-url "$BUILD_TORCH_INDEX" \
+    --index-strategy unsafe-best-match \
+    "torch==${PRIMARY_TORCH_VERSION}+${cuda_backend}" \
+    "triton==3.7.1"
 }
 
 if [[ ! -f pyproject.toml || ! -d vllm ]]; then
@@ -391,6 +407,7 @@ esac
 if [[ "$skip_vllm_build" == "1" ]]; then
   echo "Skipping vLLM build (SKIP_VLLM_BUILD=1); validating existing editable install"
 else
+  install_torch_from_mirror
   echo "Installing and compiling vLLM with uv torch backend $cuda_backend"
   uv pip install --python "$python_bin" -e "." "--torch-backend=$cuda_backend"
 fi
