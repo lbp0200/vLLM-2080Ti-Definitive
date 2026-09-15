@@ -3162,10 +3162,6 @@ edit_runtime_parameters() {
   fi
 
   MODEL_FAMILY=$(prompt_default "Model architecture (qwen35/qwen35moe/qwen4/gemma4)" "${MODEL_FAMILY:-$(guess_model_family "${MODEL_DIR:-}")}") || return 0
-  normalize_ple_placement_defaults || return 0
-  if [[ "$MODEL_FAMILY" == qwen4* ]]; then
-    edit_ple_placement_menu || return 0
-  fi
   PROFILE_GROUP=$(prompt_optional "Profile group" "${PROFILE_GROUP:-}") || return 0
   MODEL_VARIANT=$(prompt_optional "Weight precision/profile variant" "${MODEL_VARIANT:-}") || return 0
   SERVED_NAME=$(prompt_default "Served model name" "${SERVED_NAME:-${MODEL_DIR:+$(basename "$MODEL_DIR")}}") || return 0
@@ -4378,6 +4374,7 @@ set_sm75_runtime_env() {
   fi
   export FLASHQLA_ROOT
   export PYTHONPATH="$RUNTIME_ROOT${FLASHQLA_ROOT:+:$FLASHQLA_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
+  export PYTHONSAFEPATH=1
   export PATH="$RUNTIME_ROOT/.venv/bin:${CUDA_HOME}/bin:$PATH"
   if [[ -n "${FLASHQLA_ROOT:-}" ]]; then
     export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-"$FLASHQLA_ROOT/.torch_extensions_vllm_flashqla_legacy"}
@@ -5464,7 +5461,6 @@ prepare_runtime_defaults() {
   MODE=${MODE:-normal}
   normalize_mode
   SERVICE_SCOPE=${SERVICE_SCOPE:-local}
-  normalize_ple_placement_defaults || return 1
   normalize_message_type_defaults
   apply_prefix_cache_defaults
   ENABLE_AUTO_TOOL_CHOICE=$(normalize_bool "${ENABLE_AUTO_TOOL_CHOICE:-0}")
@@ -5800,7 +5796,6 @@ service_manager() {
     if [[ -z "${MODEL_FAMILY:-}" || "$MODEL_FAMILY" == "qwen" ]]; then
       MODEL_FAMILY=$detected_family
     fi
-    normalize_ple_placement_defaults || true
   fi
   if [[ -n "${GPU_DEVICES:-}" ]] && \
      normalized_devices=$(gpu_devices_to_indices "$GPU_DEVICES"); then

@@ -139,9 +139,6 @@ def stream_request(url: str, payload: dict[str, Any], endpoint: str, timeout: fl
                 if data == "[DONE]":
                     stream_done = True
                     break
-                now = time.perf_counter()
-                if first is None:
-                    first = now
                 chunks += 1
                 obj = json.loads(data)
                 if obj.get("usage"):
@@ -154,8 +151,14 @@ def stream_request(url: str, payload: dict[str, Any], endpoint: str, timeout: fl
                     text = choice.get("text")
                 else:
                     delta = choice.get("delta") or {}
-                    text = delta.get("content")
-                if isinstance(text, str):
+                    text = "".join(
+                        part
+                        for part in (delta.get("reasoning"), delta.get("content"))
+                        if isinstance(part, str)
+                    )
+                if isinstance(text, str) and text:
+                    if first is None:
+                        first = time.perf_counter()
                     text_parts.append(text)
     except Exception as exc:  # noqa: BLE001
         error = f"{type(exc).__name__}: {exc}"
@@ -233,6 +236,7 @@ def main() -> None:
             "max_tokens": args.gen_tokens,
             "temperature": 0.0,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "ignore_eos": args.ignore_eos,
             "return_token_ids": True,
         }
@@ -244,6 +248,7 @@ def main() -> None:
             "max_tokens": args.gen_tokens,
             "temperature": 0.0,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "ignore_eos": args.ignore_eos,
         }
         endpoint_path = "chat/completions"
@@ -268,6 +273,7 @@ def main() -> None:
             "max_tokens": args.gen_tokens,
             "temperature": 0.0,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "ignore_eos": args.ignore_eos,
         }
         endpoint_path = "chat/completions"

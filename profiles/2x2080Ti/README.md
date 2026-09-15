@@ -30,18 +30,16 @@ SM75 evidence is in [the validation document](../../docs/0.2.1-pre4-dflash2-sm75
 | Profile | Mode | Context | KV | MTP | Messages | GPU KV tokens | Performance |
 |---|---|---:|---|---:|---|---:|---:|
 | `qwen27b/w4a16/fast/dflash2-tqk8v4-2x172k-text-only.env` | fast | 172K x2 | TQK8V4 | DFlash2/7 | text-only | 369,439 | ~1400 / 206 |
-| `qwen27b/w4a16/fast/dflash2-tqk8v4-1x256k-text-image.env` | fast | 256K x1 | TQK8V4 | DFlash2/7 | text+image | unavailable (LBNHC limit ~73K) | unavailable |
+| `qwen27b/w4a16/fast/dflash2-tqk8v4-1x256k-text-image.env` | fast | 256K x1 | TQK8V4 | DFlash2/7 | text+image | 318,010 | 1389.7 / 94.0 |
 | `qwen27b/w4a16/normal/mtp-fp8kv-1x240k-text-only.env` | normal | 240K | FP8 | 3 | text-only | 463,890 | 1433.2 / 76.8 |
 | `qwen27b/w4a16/normal/mtp-fp8kv-1x240k-text-image.env` | normal | 240K | FP8 | 3 | text+image | 426,080 | 1250.6 / 52.5 |
 | `qwen27b/w4a16/normal/nomtp-fp8kv-8x192k-text-only.env` | normal | 192K | FP8 | 0 | text-only | 518,191 | 1372.1 / 42.0 |
 | `qwen27b/w4a16/fast/mtp-tq4nc-8x262k-text-only.env` | fast | 262K | TQ4NC | 3 | text-only | 732,381 | 1402.9 / 103.5 |
 
 DFlash2's warmed 4K/128 text-only request measured approximately **1,400 /
-206 tok/s** (prefill / decode); the first request is excluded because it may
-trigger rejection and TurboQuant kernel JIT. The text-image 256K route was
-retested on the current runtime with a real multimodal startup, but cannot
-serve 256K: the supported LBNHC layout leaves only ~4.79 GiB KV memory
-(estimated maximum length ~73K). No image throughput is reported.
+206 tok/s** (prefill / decode). The text-image route measured **1,389.7 /
+94.0 tok/s** with a real image (4K prompt / 128 generated tokens). The first
+request is excluded because it may trigger rejection and TurboQuant kernel JIT.
 
 ### Concurrent benchmark lanes
 

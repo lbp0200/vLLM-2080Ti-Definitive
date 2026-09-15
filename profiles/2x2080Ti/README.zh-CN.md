@@ -29,7 +29,7 @@
 | Profile | 模式 | 上下文 | KV | MTP | 消息 | GPU KV tokens | 性能 |
 |---|---|---:|---|---:|---|---:|---:|
 | `qwen27b/w4a16/fast/dflash2-tqk8v4-2x172k-text-only.env` | fast | 172K x2 | TQK8V4 | DFlash2/7 | text-only | 369,439 | 约 1400 / 206 |
-| `qwen27b/w4a16/fast/dflash2-tqk8v4-1x256k-text-image.env` | fast | 256K x1 | TQK8V4 | DFlash2/7 | text+image | 不可用（LBNHC 约 73K 上限） | 不可用 |
+| `qwen27b/w4a16/fast/dflash2-tqk8v4-1x256k-text-image.env` | fast | 256K x1 | TQK8V4 | DFlash2/7 | text+image | 318,010 | 1389.7 / 94.0 |
 | `qwen27b/w4a16/normal/mtp-fp8kv-1x240k-text-only.env` | normal | 240K | FP8 | 3 | text-only | 463,890 | 1433.2 / 76.8 |
 | `qwen27b/w4a16/normal/mtp-fp8kv-1x240k-text-image.env` | normal | 240K | FP8 | 3 | text+image | 426,080 | 1250.6 / 52.5 |
 | `qwen27b/w4a16/normal/nomtp-fp8kv-8x192k-text-only.env` | normal | 192K | FP8 | 0 | text-only | 518,191 | 1372.1 / 42.0 |
@@ -37,8 +37,8 @@
 
 DFlash2 预热后的 4K/128 纯文本请求约为 **1,400 / 206 tok/s**（prefill /
 decode）；首个请求可能触发 rejection 和 TurboQuant kernel JIT，因此不计入结果。
-256K 多模态路线已在当前运行时用真实多模态启动复测，但无法服务 256K：支持的
-LBNHC 布局只有约 4.79 GiB KV 内存，估算最大上下文约 73K。因此不报告图像吞吐。
+多模态路线已用真实图片完成 4K/128 测试，吞吐为 **1389.7 / 94.0 tok/s**
+（prefill / decode）；不把纯文本合成数据归到该路线名下。
 
 ### 并发测试路线
 
