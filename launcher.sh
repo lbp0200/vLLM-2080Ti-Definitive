@@ -1233,6 +1233,8 @@ save_manager_state() {
     printf 'LAST_PERF_DECODE_MEAN=%q\n' "${LAST_PERF_DECODE_MEAN:-}"
     printf 'LAST_PERF_DECODE_MEDIAN=%q\n' "${LAST_PERF_DECODE_MEDIAN:-}"
     printf 'LAST_PERF_SAMPLES=%q\n' "${LAST_PERF_SAMPLES:-}"
+    printf 'LAST_PERF_LONG_PREFILL=%q\n' "${LAST_PERF_LONG_PREFILL:-}"
+    printf 'LAST_PERF_LONG_DECODE=%q\n' "${LAST_PERF_LONG_DECODE:-}"
   } > "$STATE_FILE"
 }
 
@@ -3614,6 +3616,7 @@ show_launch_status() {
       echo "    Lane:      ${LAST_PERF_LABEL:-uncached synthetic 4K/128, 3 sequential runs}"
       echo "    Prefill:   mean ${LAST_PERF_PREFILL_MEAN:-n/a} tok/s | median ${LAST_PERF_PREFILL_MEDIAN:-n/a} tok/s"
       echo "    Decode:    mean ${LAST_PERF_DECODE_MEAN:-n/a} tok/s | median ${LAST_PERF_DECODE_MEDIAN:-n/a} tok/s"
+      echo "    Long 32K/512: prefill ${LAST_PERF_LONG_PREFILL:-n/a} tok/s | decode ${LAST_PERF_LONG_DECODE:-n/a} tok/s"
       ;;
     skipped_prefix_cache)
       echo "  Performance reference: skipped (prefix caching is not explicitly disabled)"
@@ -3645,6 +3648,7 @@ show_startup_performance_report() {
   echo "  Aggregate:"
   echo "    Prefill mean/median: ${LAST_PERF_PREFILL_MEAN:-n/a} / ${LAST_PERF_PREFILL_MEDIAN:-n/a} tok/s"
   echo "    Decode  mean/median: ${LAST_PERF_DECODE_MEAN:-n/a} / ${LAST_PERF_DECODE_MEDIAN:-n/a} tok/s"
+  echo "    Long 32K/512:       prefill ${LAST_PERF_LONG_PREFILL:-n/a} / decode ${LAST_PERF_LONG_DECODE:-n/a} tok/s"
   echo
   echo "  Synthetic reference only; it is neither a quality test nor a capacity proof."
   echo "  It does not change MAX_MODEL_LEN, GPU utilization, or KV-cache allocation."
@@ -4891,6 +4895,8 @@ clear_startup_performance_state() {
   LAST_PERF_DECODE_MEAN=""
   LAST_PERF_DECODE_MEDIAN=""
   LAST_PERF_SAMPLES=""
+  LAST_PERF_LONG_PREFILL=""
+  LAST_PERF_LONG_DECODE=""
 }
 
 startup_performance_helper_path() {
@@ -4934,6 +4940,8 @@ startup_performance_eligibility_reason() {
 
 startup_performance_sample_values() {
   local result=$1
+  local expected_prompt=${2:-4096}
+  local expected_completion=${3:-128}
 
   printf '%s' "$result" | "$RUNTIME_ROOT/.venv/bin/python" -c '
 import json
@@ -4959,9 +4967,10 @@ if record.get("error"):
     raise SystemExit("request error: {}".format(record.get("error")))
 if record.get("http_status") != 200 or not record.get("stream_done"):
     raise SystemExit("request did not complete a successful stream")
-if record.get("prompt_tokens") != 4096 or record.get("completion_tokens") != 128:
+if record.get("prompt_tokens") != int(sys.argv[1]) or record.get("completion_tokens") != int(sys.argv[2]):
     raise SystemExit(
-        "expected exactly 4096 prompt and 128 completion tokens, got "
+        "expected exactly {}/{} prompt/completion tokens, got "
+        .format(int(sys.argv[1]), int(sys.argv[2])) +
         "{}/{}".format(record.get("prompt_tokens"), record.get("completion_tokens"))
     )
 if not record.get("allowed_token_only"):
@@ -4973,7 +4982,7 @@ if not all(isinstance(value, (int, float)) and math.isfinite(value) and value > 
            for value in (prefill, decode)):
     raise SystemExit("benchmark helper returned invalid throughput values")
 print(f"{prefill:.6f}\t{decode:.6f}")
-'
+' "$expected_prompt" "$expected_completion"
 }
 
 startup_performance_statistics() {
@@ -5054,6 +5063,26 @@ run_startup_performance_test() {
   LAST_PERF_NOTE=""
   LAST_PERF_LABEL="uncached synthetic 4K/128, 3 sequential runs"
   LAST_PERF_SAMPLES="${prefill_samples[0]},${decode_samples[0]};${prefill_samples[1]},${decode_samples[1]};${prefill_samples[2]},${decode_samples[2]}"
+  echo
+  echo "Running uncached synthetic 32K/512 long-context performance test..."
+  if ! result=$("$RUNTIME_ROOT/.venv/bin/python" "$helper" \
+      --model-dir "$MODEL_DIR" --served-name "$SERVED_NAME" \
+      --base-url "http://${url_host}:${PORT}/v1" --endpoint completions \
+      --prompt-tokens 32768 --gen-tokens 512 \
+      --label "launcher-startup-long" --prompt-variant "launcher-${STAMP}-long" \
+      --out /dev/null --ignore-eos --pure-filler --allowed-token-text " the" 2>&1); then
+    LAST_PERF_STATUS=failed
+    LAST_PERF_NOTE="failed: long-context benchmark helper exited"
+    return 1
+  fi
+  if ! values=$(startup_performance_sample_values "$result" 32768 512 2>&1); then
+    LAST_PERF_STATUS=failed
+    LAST_PERF_NOTE="failed: long-context sample was not a complete fixed-token response"
+    echo "  $values"
+    return 1
+  fi
+  IFS=$'\t' read -r LAST_PERF_LONG_PREFILL LAST_PERF_LONG_DECODE <<< "$values"
+  echo "  32K/512: prefill ${LAST_PERF_LONG_PREFILL} tok/s, decode ${LAST_PERF_LONG_DECODE} tok/s"
   return 0
 }
 
