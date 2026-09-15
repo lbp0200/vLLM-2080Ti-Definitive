@@ -11,7 +11,7 @@ stacks. It is
 based on upstream vLLM; retain both the upstream license and attribution to
 `github.com/weicj` when redistributing a derivative.
 
-Language: English | [Simplified Chinese](README.zh-CN.md)
+Language: English | [简体中文](README.zh-CN.md)
 
 ![Live single-request throughput demo](docs/assets/vllmspeed.gif)
 
