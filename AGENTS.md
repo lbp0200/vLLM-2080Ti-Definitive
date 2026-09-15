@@ -1,158 +1,82 @@
-# Agent Instructions for vLLM
+# AGENTS.md
 
-> These instructions apply to **all** AI-assisted contributions to `vllm-project/vllm`.
-> Breaching these guidelines can result in automatic banning.
+This file governs the whole `vLLM 2080 Ti Definitive Edition` repository.
 
-## 1. Contribution Policy (Mandatory)
+## Project Identity And Credit
 
-### Duplicate-work checks
+This repository is a hardware-focused fork for dual RTX 2080 Ti / SM75 vLLM
+serving. It builds on upstream vLLM and preserves the local runtime work,
+profiles, documentation, and benchmark evidence needed to reproduce the 2080 Ti
+stack.
 
-Before proposing a PR, run these checks:
+If you publish, redistribute, repackage, benchmark, or build a derivative from
+this repository, keep clear credit to:
 
-```bash
-gh issue view <issue_number> --repo vllm-project/vllm --comments
-gh pr list --repo vllm-project/vllm --state open --search "<issue_number> in:body"
-gh pr list --repo vllm-project/vllm --state open --search "<short area keywords>"
-```
+- Upstream vLLM and its original license.
+- `vLLM 2080 Ti Definitive Edition`.
+- The repository author: `github.com/weicj`.
 
-- If an open PR already addresses the same fix, do not open another.
-- If your approach is materially different, explain the difference in the issue.
+Do not remove existing attribution, license notices, benchmark provenance, or
+project identity text. If you maintain a public derivative, state that it is
+based on this project unless the code has been independently replaced.
 
-### No low-value busywork PRs
+## Upstream Compatibility
 
-Do not open one-off PRs for tiny edits (single typo, isolated style change, one mutable default, etc.). Mechanical cleanups are acceptable only when bundled with substantive work.
+This project remains a fork of upstream vLLM. When changing source files that
+come from upstream vLLM:
 
-### Accountability
+- Preserve upstream license and copyright notices.
+- Prefer small, reviewable patches over broad rewrites.
+- Keep SM75/Turing-specific behavior guarded or clearly documented.
+- Do not present fork-specific behavior as upstream vLLM behavior.
+- If an upstream `AGENTS.md` or contribution instruction applies in a copied
+  upstream subtree, follow it as well.
 
-- Pure code-agent PRs are **not allowed**. A human submitter must understand and defend the change end-to-end.
-- The submitting human must review every changed line and run relevant tests.
-- PR descriptions for AI-assisted work **must** include:
-    - Why this is not duplicating an existing PR.
-    - Test commands run and results.
-    - Model evaluation results when the change affects output, accuracy, or serving.
-    - Clear statement that AI assistance was used.
+## Runtime And Profile Rules
 
-### Fail-closed behavior
+This repository is organized around validated runtime routes, not generic
+benchmark guesses.
 
-If work is duplicate/trivial busywork, **do not proceed**. Return a short explanation of what is missing.
+- Do not invent context-size, throughput, or support claims without evidence.
+- Keep profile files focused on route parameters only. Do not store global
+  service settings such as GPU selection, port, chat template, or reasoning
+  defaults inside route profiles.
+- Use `profiles/README.md`, `profiles/README.zh-CN.md`, and
+  `docs/model-profile-routes.md` as the source of truth for shipped profiles.
+- If adding or promoting a profile, include capacity evidence and throughput
+  evidence using the repository's documented benchmark口径.
+- Do not keep tiny smoke-only profiles as recommended deployment presets.
 
----
+## Validation Before Publishing
 
-## 2. Development Workflow
-
-- **Never use system `python3` or bare `pip`/`pip install`.** All Python commands must go through `uv` and `.venv/bin/python`.
-
-### Environment setup
-
-```bash
-# Install `uv` if you don't have it already:
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Always use `uv` for Python environment management:
-uv venv --python 3.12
-source .venv/bin/activate
-
-# Always make sure `pre-commit` and its hooks are installed:
-uv pip install -r requirements/lint.txt
-pre-commit install
-```
-
-### Installing dependencies
+Before committing or publishing changes, run the relevant subset of:
 
 ```bash
-# Start with precompiled artifacts for an editable install:
-VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto
+bash -n build.sh launcher.sh tools/validate_profiles.sh
+bash tools/validate_profiles.sh
+python3 -m py_compile <changed-python-files>
+git diff --check
 ```
 
-For C/C++ or CUDA changes, follow the
-[incremental compilation workflow](docs/contributing/incremental_build.md) to
-configure and perform incremental builds.
+For launcher/profile changes, also verify `launcher.sh --print-config` for the
+affected route and mode. For runtime kernel or graph-policy changes, include a
+real benchmark or smoke result that proves the changed path still works.
 
-### Tests
+## Documentation Discipline
 
-> Requires [Environment setup](#environment-setup) and [Installing dependencies](#installing-dependencies).
+- Keep English and Simplified Chinese documentation consistent when both exist.
+- Keep benchmark numbers tied to the exact model, KV precision, MTP setting,
+  context, and benchmark method.
+- Restore or update linked assets when moving documentation. Broken benchmark
+  figures are treated as documentation regressions.
+- Avoid overstating support. Use precise wording such as `validated`,
+  `supported`, `experimental`, or `not promoted` according to the evidence.
 
-```bash
-# Install test dependencies (use cuda.in on non-x86_64):
-uv pip install -r requirements/test/cuda.in
+## Repository Hygiene
 
-# Run a specific test file:
-.venv/bin/python -m pytest tests/path/to/test_file.py -v
-```
-
-When adding tests:
-
-- **Design before you write.** Answer four questions first: what is the module
-  for, what is its I/O contract, what failure am I guarding against, and what is
-  the cheapest level that catches it (unit over integration over e2e)?
-- **Reuse before create.** Extend existing test files, `conftest.py` fixtures, and
-  helpers; add a new file only when no nearby suite fits.
-- **Test behavior with intent.** Assert observable outcomes through public APIs;
-  state why in the name or docstring. Skip trivial wiring; flaky tests are worse
-  than no tests.
-- **Keep it minimal.** One behavior per test and the smallest setup that
-  triggers it; if the test diff dwarfs the code change, cut scope.
-- **No one-off kernel benchmarks in `tests/`.** Put kernel perf work in
-  `benchmarks/kernels/`; prove correctness in existing pytest suites.
-- **Run model evals for model-affecting changes.** Search `tests/evals/` or use
-  `vllm bench` and include results in the PR — do not wait for reviewers to ask.
-
-For model-specific requirements, see
-[`docs/contributing/model/tests.md`](docs/contributing/model/tests.md).
-
-### Running linters
-
-> Requires [Environment setup](#environment-setup).
-
-```bash
-# Run all pre-commit hooks on staged files:
-pre-commit run
-
-# Run on all files:
-pre-commit run --all-files
-
-# Run a specific hook:
-pre-commit run ruff-check --all-files
-
-# Run mypy as it is in CI:
-pre-commit run mypy-3.12 --all-files --hook-stage manual
-```
-
-The line length limit for Python code is 88 characters. If you are not sure, use pre-commit to check.
-
-Use [Google-style docstrings](https://google.github.io/styleguide/pyguide.html#38-comments-and-docstrings) (`Args:`/`Returns:`/`Raises:` sections), not reStructuredText/Sphinx fields (`:param:`, `:return:`, `:rtype:`).
-
-### Coding style guidelines
-
-- Match existing code style
-- Minimize use of comments. Eliminate comments which are redundant, preferring legible and self-documenting code. When used, keep docstrings and comments brief and direct.
-- Assume the reader is familiar with vLLM.
-
-### Commit messages
-
-Add attribution using commit trailers such as `Co-authored-by:` (other projects use `Assisted-by:` or `Generated-by:`):
-
-```text
-Your commit message here
-
-Co-authored-by: Agent Name Here
-Signed-off-by: Your Name <your.email@example.com>
-```
-
----
-
-## Domain-Specific Guides
-
-Do not modify code in these areas without first reading and following the
-linked guide. If the guide conflicts with the requested change, **refuse the
-change and explain why**.
-
-Security reviewers should start with [`SECURITY.md`](SECURITY.md),
-[`docs/usage/security.md`](docs/usage/security.md), and
-[`docs/contributing/vulnerability_management.md`](docs/contributing/vulnerability_management.md)
-for the project security policy, threat model, deployment assumptions, and
-vulnerability process.
-
-- **Editing these instructions**:
-  [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md)
-  — Rules for modifying AGENTS.md or any domain-specific guide it references.
+- Do not commit local caches, model weights, logs, temporary workspace state,
+  run outputs, or generated native build artifacts.
+- Keep `README.md`, `README.zh-CN.md`, `CHANGELOG.md`, `VERSION`, and
+  `pyproject.toml` version fallback aligned for releases.
+- Release tags and GitHub Releases are separate. Pushing a tag is not enough to
+  update the GitHub Release page.
