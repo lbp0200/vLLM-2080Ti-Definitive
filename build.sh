@@ -161,11 +161,58 @@ flashqla_enabled=${FLASHQLA_ENABLED:-1}
 flashqla_clone_timeout=${FLASHQLA_CLONE_TIMEOUT:-180}
 skip_vllm_build=${SKIP_VLLM_BUILD:-0}
 
+BUILD_PYPI_OFFICIAL_INDEX=${BUILD_PYPI_OFFICIAL_INDEX:-https://pypi.org/simple}
+BUILD_PYPI_FOREIGN_INDEX=${BUILD_PYPI_FOREIGN_INDEX:-https://pypi.python.org/simple}
+BUILD_PYPI_DOMESTIC_INDEX=${BUILD_PYPI_DOMESTIC_INDEX:-https://pypi.tuna.tsinghua.edu.cn/simple}
+BUILD_GIT_FOREIGN_REPO_PREFIX=${BUILD_GIT_FOREIGN_REPO_PREFIX:-https://gh-proxy.com/}
+BUILD_GIT_DOMESTIC_REPO_PREFIX=${BUILD_GIT_DOMESTIC_REPO_PREFIX:-https://ghfast.top/}
+BUILD_PREFLIGHT_SAMPLE_TIMEOUT_SECONDS=${BUILD_PREFLIGHT_SAMPLE_TIMEOUT_SECONDS:-5}
+
 validate_max_jobs_range "$max_jobs" "$cpu_threads"
 is_positive_integer "$flashqla_clone_timeout" || fail "FLASHQLA_CLONE_TIMEOUT must be a positive integer."
 [[ "$skip_vllm_build" == "0" || "$skip_vllm_build" == "1" ]] ||
   fail "SKIP_VLLM_BUILD must be 0 or 1."
 require_command uv
+
+measure_network_url_ms() {
+  local url=$1 timeout=${2:-5} start end
+  start=$(date +%s%3N)
+  if command -v curl >/dev/null 2>&1; then
+    curl -L --fail --silent --show-error --connect-timeout "$timeout" --max-time "$timeout" -o /dev/null "$url" || return 1
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --timeout="$timeout" -O /dev/null "$url" || return 1
+  else
+    return 1
+  fi
+  end=$(date +%s%3N)
+  printf '%s\n' "$((end - start))"
+}
+
+run_build_network_preflight() {
+  local -a modes=(official foreign domestic) pypi_urls=("$BUILD_PYPI_OFFICIAL_INDEX" "$BUILD_PYPI_FOREIGN_INDEX" "$BUILD_PYPI_DOMESTIC_INDEX")
+  local -a prefixes=("" "$BUILD_GIT_FOREIGN_REPO_PREFIX" "$BUILD_GIT_DOMESTIC_REPO_PREFIX")
+  local best_mode=official best_total=999999999 mode pypi_probe git_probe pypi_ms git_ms total i
+  echo "Build preflight: benchmarking PyPI and Git routes..."
+  for i in 0 1 2; do
+    mode=${modes[$i]}; pypi_probe=${pypi_urls[$i]%/}/pip/
+    git_probe="${prefixes[$i]}${flashqla_repo#https://github.com/}/info/refs?service=git-upload-pack"
+    pypi_ms=$(measure_network_url_ms "$pypi_probe" "$BUILD_PREFLIGHT_SAMPLE_TIMEOUT_SECONDS" || echo 999999)
+    git_ms=$(measure_network_url_ms "$git_probe" "$BUILD_PREFLIGHT_SAMPLE_TIMEOUT_SECONDS" || echo 999999)
+    total=$((pypi_ms + git_ms))
+    echo "Build preflight: $mode PyPI=${pypi_ms}ms Git=${git_ms}ms total=${total}ms"
+    if (( total < best_total )); then best_total=$total; best_mode=$mode; fi
+  done
+  case "$best_mode" in
+    official) export UV_INDEX_URL="$BUILD_PYPI_OFFICIAL_INDEX"; git_mirror_prefix="" ;;
+    foreign) export UV_INDEX_URL="$BUILD_PYPI_FOREIGN_INDEX"; git_mirror_prefix="$BUILD_GIT_FOREIGN_REPO_PREFIX" ;;
+    domestic) export UV_INDEX_URL="$BUILD_PYPI_DOMESTIC_INDEX"; git_mirror_prefix="$BUILD_GIT_DOMESTIC_REPO_PREFIX" ;;
+  esac
+  export BUILD_GIT_MIRROR_PREFIX="$git_mirror_prefix"
+  if [[ -n "$git_mirror_prefix" ]]; then
+    export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.${git_mirror_prefix}https://github.com/.insteadOf" GIT_CONFIG_VALUE_0="https://github.com/"
+  fi
+  echo "Build preflight: selected $best_mode route (UV_INDEX_URL=$UV_INDEX_URL)"
+}
 
 if [[ ! -f pyproject.toml || ! -d vllm ]]; then
   fail "Run this script from the 0.2.1 source tree."
@@ -301,6 +348,7 @@ echo "============================================================"
 
 check_primary_host
 check_cuda_glibc_compatibility
+run_build_network_preflight
 
 export MAX_JOBS="$max_jobs"
 export BUILD_MAX_JOBS=${BUILD_MAX_JOBS:-$MAX_JOBS}
