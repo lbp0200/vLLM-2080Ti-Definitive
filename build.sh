@@ -176,7 +176,7 @@ require_command uv
 
 measure_network_url_ms() {
   local url=$1 timeout=${2:-5} start end
-  start=$(date +%s%3N)
+  start=$(date +%s)
   if command -v curl >/dev/null 2>&1; then
     curl -L --fail --silent --show-error --connect-timeout "$timeout" --max-time "$timeout" -o /dev/null "$url" || return 1
   elif command -v wget >/dev/null 2>&1; then
@@ -184,8 +184,8 @@ measure_network_url_ms() {
   else
     return 1
   fi
-  end=$(date +%s%3N)
-  printf '%s\n' "$((end - start))"
+  end=$(date +%s)
+  printf '%s\n' "$(((end - start) * 1000))"
 }
 
 run_build_network_preflight() {
