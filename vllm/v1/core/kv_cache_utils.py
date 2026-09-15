@@ -2384,9 +2384,14 @@ def _uses_native_dflash2(vllm_config: VllmConfig) -> bool:
     draft_model_config = getattr(speculative_config, "draft_model_config", None)
     if draft_model_config is None:
         return False
-    return "DFlash2DraftModel" in (
-        getattr(draft_model_config, "architectures", ()) or ()
-    )
+    architectures = getattr(draft_model_config, "architectures", ()) or ()
+    if "DFlash2DraftModel" in architectures:
+        return True
+    # The architecture can be normalized away when the draft config is loaded
+    # through the speculative-model registry. Keep the explicit DFlash2 model
+    # identity as a fallback without classifying ordinary DFlash checkpoints.
+    model = str(getattr(draft_model_config, "model", ""))
+    return "dflash2" in model.lower()
 
 
 def _get_dflash_draft_layer_names(
@@ -2444,15 +2449,17 @@ def _get_dflash_draft_layer_names(
     if len(sliding_draft_layer_names) != draft_num_layers:
         return set()
 
-    # A target with its own sliding layers is ambiguous. Do not infer a draft
-    # role unless the DFlash-only shape is paired with an aligned Mamba target.
-    target_has_aligned_mamba = any(
-        isinstance(layer_spec, MambaSpec) and layer_spec.mamba_cache_mode == "align"
+    # A target with its own sliding layers is ambiguous. The DFlash2 Qwen
+    # target has no sliding specs, so an exact draft-sized sliding subset is
+    # sufficient to identify the five draft layers even when Mamba alignment
+    # has already been normalized away by the backend.
+    target_has_sliding = any(
+        isinstance(layer_spec, SlidingWindowSpec)
         for layer_name, layer_spec in kv_cache_specs.items()
         if layer_name in registered_layer_names
         and layer_name not in sliding_draft_layer_names
     )
-    if not target_has_aligned_mamba:
+    if target_has_sliding:
         return set()
 
     logger.info(

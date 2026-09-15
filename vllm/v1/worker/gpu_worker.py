@@ -535,6 +535,10 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
+        # Dummy profile forwards run before serving starts. Keep pipeline
+        # transfers synchronous during this lifecycle phase so a fast PP stage
+        # cannot return its RPC while a later stage is still compiling.
+        self._enter_startup_sync_mode()
         maybe_apply_startup_plan(self)
 
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
@@ -821,6 +825,11 @@ class Worker(WorkerBase):
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
+            # PP sends launched by warmup/capture must be fully drained before
+            # returning from the collective RPC.  Leaving a device send in
+            # flight across the capture boundary can block the next PP stage
+            # while EngineCore is waiting for all workers to report ready.
+            self._wait_for_pp_sends()
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (
@@ -954,10 +963,37 @@ class Worker(WorkerBase):
         # intra-op parallelism.
         set_torch_threads_for_runtime()
 
+        self._leave_startup_sync_mode()
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
         )
+
+    def _enter_startup_sync_mode(self) -> None:
+        """Disable asynchronous PP scheduling during startup profiling."""
+        if self.parallel_config.pipeline_parallel_size <= 1:
+            return
+        if hasattr(self, "_startup_async_scheduling"):
+            return
+        runner = self.model_runner
+        self._startup_async_scheduling = getattr(
+            runner, "use_async_scheduling", None
+        )
+        self._startup_async_spec_decode = getattr(
+            runner, "use_async_spec_decode", None
+        )
+        if self._startup_async_scheduling is not None:
+            runner.use_async_scheduling = False
+        if self._startup_async_spec_decode is not None:
+            runner.use_async_spec_decode = False
+
+    def _leave_startup_sync_mode(self) -> None:
+        """Restore asynchronous scheduling for steady-state execution."""
+        runner = self.model_runner
+        if hasattr(self, "_startup_async_scheduling"):
+            runner.use_async_scheduling = self._startup_async_scheduling
+        if hasattr(self, "_startup_async_spec_decode"):
+            runner.use_async_spec_decode = self._startup_async_spec_decode
 
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()
@@ -1143,10 +1179,7 @@ class Worker(WorkerBase):
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         # Wait for the previous step's sends so this forward pass cannot
         # overwrite buffers they are still reading.
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
+        self._wait_for_pp_sends()
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
@@ -1231,6 +1264,14 @@ class Worker(WorkerBase):
         self._pp_send_work = handles[1:]
 
         return None
+
+    def _wait_for_pp_sends(self) -> None:
+        """Drain outstanding PP device sends before a lifecycle boundary."""
+        if not self._pp_send_work:
+            return
+        for handle in self._pp_send_work:
+            handle.wait()
+        self._pp_send_work = []
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
