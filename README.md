@@ -83,7 +83,7 @@ git switch --track origin/vllm-2080ti-definitive-0.2.x
 
 ```bash
 MODEL_DIR=/path/to/checkpoint \
-PROFILE=2x2080Ti/qwen27b/w8a16/fast/tqk8v4-256K-mtp3-text-only.env \
+PROFILE=2x2080Ti/qwen27b/w8a16/fast/mtp-tqk8v4-1x256k-text-only.env \
 MODE=fast GPU_DEVICES=4,5 TP_SIZE=2 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
@@ -96,9 +96,9 @@ profiles.
 
 Start with [the Profile Guide](profiles/README.md). Profiles use the layout
 `profiles/<hardware>/<model>/<weight>/<mode>/<route>.env`; for example,
-`2x2080Ti/qwen27b/w8a16/normal/fp16kv-128K-mtp3-text-only.env`,
-`2x2080Ti/qwen35b/w8a16/normal/fp16kv-256K-nomtp-text-only.env`, and
-`4xT10/qwen27b/w8a16/normal/fp16kv-256K-mtp3-text-image.env`.
+`2x2080Ti/qwen27b/w8a16/normal/mtp-fp16kv-1x128k-text-only.env`,
+`2x2080Ti/qwen35b/w8a16/normal/nomtp-fp16kv-1x256k-text-only.env`, and
+`4xT10/qwen27b/w8a16/normal/mtp-fp16kv-1x256k-text-image.env`.
 
 Available modes:
 
