@@ -347,6 +347,9 @@ else
   uv pip install --python "$python_bin" -e "." "--torch-backend=$cuda_backend"
 fi
 
+"$python_bin" tools/patch_torch_inductor_e8m0.py
+"$python_bin" tools/check_torch_inductor_e8m0.py
+
 prepare_flashqla_sm75
 
 echo "Checking the resulting runtime"
