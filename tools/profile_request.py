@@ -171,6 +171,7 @@ def stream_request(url: str, payload: dict[str, Any], endpoint: str, timeout: fl
         "chunks": chunks,
         "text": "".join(text_parts),
         "completion_tokens_from_ids": len(completion_token_ids),
+        "completion_token_ids": completion_token_ids,
         "usage": usage,
         "raw_events_preview": raw_preview,
         "ttft_s": None if first is None else first - start,
@@ -207,6 +208,8 @@ def main() -> None:
     parser.add_argument("--gpu-interval", type=float, default=5.0)
     parser.add_argument("--read-timeout", type=float, default=1800.0)
     parser.add_argument("--ignore-eos", action="store_true")
+    parser.add_argument("--prompt-variant", default="")
+    parser.add_argument("--allowed-token-text", default="")
     parser.add_argument(
         "--pure-filler",
         action="store_true",
@@ -240,6 +243,13 @@ def main() -> None:
             "ignore_eos": args.ignore_eos,
             "return_token_ids": True,
         }
+        allowed_token_id = None
+        if args.allowed_token_text:
+            allowed_ids = tokenizer.encode(args.allowed_token_text, add_special_tokens=False)
+            if len(allowed_ids) != 1:
+                raise SystemExit("--allowed-token-text must encode to exactly one token")
+            allowed_token_id = allowed_ids[0]
+            payload["allowed_token_ids"] = [allowed_token_id]
         endpoint_path = "completions"
     elif args.endpoint == "chat-text":
         payload = {
@@ -319,6 +329,7 @@ def main() -> None:
         "completion_token_source": token_source,
         "ignore_eos": args.ignore_eos,
         "pure_filler": args.pure_filler,
+        "prompt_variant": args.prompt_variant,
         "prepare_s": prepare_s,
         **result,
         "text_chars": len(text),
@@ -329,6 +340,14 @@ def main() -> None:
         "gpu_log": str(args.gpu_log) if args.gpu_log else None,
         "gpu_summary": parse_gpu_log(args.gpu_log) if args.gpu_log else {},
     }
+    if args.allowed_token_text:
+        allowed_id = tokenizer.encode(args.allowed_token_text, add_special_tokens=False)
+        token_ids = result.get("completion_token_ids") or []
+        record["allowed_token_only"] = (
+            len(allowed_id) == 1
+            and len(token_ids) == completion_tokens
+            and all(token_id == allowed_id[0] for token_id in token_ids)
+        )
     if args.expect_image_card:
         record["image_card_correct"] = image_card_correct(text)
     args.out.parent.mkdir(parents=True, exist_ok=True)
