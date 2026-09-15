@@ -10,7 +10,7 @@ behavior.
 
 ## Presets
 
-- `qwen-froggeric-v20.jinja`: Qwen 3.5/3.6 fixed chat template from
+- `qwen-froggeric-v22.5.jinja`: Qwen 3.5/3.6/3.8 fixed chat template from
   <https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates>. Useful when you
   want its tool/reasoning/KV-cache-safe rendering behavior.
 
