@@ -323,7 +323,7 @@ normalize_speculative_method_value() {
   case "${1,,}" in
     ""|none|off|disabled) ;;
     mtp) echo mtp ;;
-    dflash) echo dflash ;;
+    dflash|dflash2) echo dflash ;;
     *)
       printf '%s\n' "${1,,}"
       ;;
@@ -677,7 +677,11 @@ current_speculative_label() {
     draft_ref=$(effective_speculative_model)
     draft_ref=${draft_ref:-embedded-speculator}
     draft_ref=${draft_ref##*/}
-    printf 'dflash/%s (%s%s)\n' "$tokens" "$draft_ref" "$suffix"
+    if [[ "${draft_ref,,}" == *dflash2* ]]; then
+      printf 'dflash2/%s (%s%s)\n' "$tokens" "$draft_ref" "$suffix"
+    else
+      printf 'dflash/%s (%s%s)\n' "$tokens" "$draft_ref" "$suffix"
+    fi
   else
     printf '%s/%s%s\n' "$method" "$tokens" "$suffix"
   fi
@@ -718,7 +722,11 @@ profile_speculative_label() {
   fi
 
   if [[ "$method" == "dflash" && -n "$spec_model" ]]; then
-    printf 'dflash:%s\n' "$tokens"
+    if [[ "${spec_model,,}" == *dflash2* ]]; then
+      printf 'dflash2:%s\n' "$tokens"
+    else
+      printf 'dflash:%s\n' "$tokens"
+    fi
   else
     printf '%s:%s\n' "$method" "$tokens"
   fi
@@ -747,6 +755,7 @@ MAX_NUM_SEQS
   SPECULATIVE_DRAFT_TP_SIZE
   SPECULATIVE_MAX_MODEL_LEN
   SPECULATIVE_ATTENTION_BACKEND
+  SPECULATIVE_KV_CACHE_DTYPE
   SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH
   SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION
   MESSAGE_TYPE
@@ -1178,6 +1187,7 @@ save_manager_state() {
 	    printf 'SPECULATIVE_DRAFT_TP_SIZE=%q\n' "${SPECULATIVE_DRAFT_TP_SIZE:-}"
 	    printf 'SPECULATIVE_MAX_MODEL_LEN=%q\n' "${SPECULATIVE_MAX_MODEL_LEN:-}"
 	    printf 'SPECULATIVE_ATTENTION_BACKEND=%q\n' "${SPECULATIVE_ATTENTION_BACKEND:-}"
+	    printf 'SPECULATIVE_KV_CACHE_DTYPE=%q\n' "${SPECULATIVE_KV_CACHE_DTYPE:-}"
 	    printf 'SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH=%q\n' "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}"
 	    printf 'SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION=%q\n' "${SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION:-0}"
 	    printf 'MESSAGE_TYPE=%q\n' "${MESSAGE_TYPE:-}"
@@ -1857,6 +1867,7 @@ profile_summary() {
   SPECULATIVE_DRAFT_TP_SIZE
   SPECULATIVE_MAX_MODEL_LEN
   SPECULATIVE_ATTENTION_BACKEND
+  SPECULATIVE_KV_CACHE_DTYPE
   SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH
     SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION
     VLLM_ALLOW_LONG_MAX_MODEL_LEN
@@ -2821,6 +2832,7 @@ save_current_profile_menu() {
   write_profile_entry "$target_file.tmp" SPECULATIVE_DRAFT_TP_SIZE "${SPECULATIVE_DRAFT_TP_SIZE:-}"
   write_profile_entry "$target_file.tmp" SPECULATIVE_MAX_MODEL_LEN "${SPECULATIVE_MAX_MODEL_LEN:-}"
   write_profile_entry "$target_file.tmp" SPECULATIVE_ATTENTION_BACKEND "${SPECULATIVE_ATTENTION_BACKEND:-}"
+  write_profile_entry "$target_file.tmp" SPECULATIVE_KV_CACHE_DTYPE "${SPECULATIVE_KV_CACHE_DTYPE:-}"
   write_profile_entry "$target_file.tmp" SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-}"
   write_profile_entry "$target_file.tmp" SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION "${SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION:-}"
   write_profile_entry "$target_file.tmp" MESSAGE_TYPE "${MESSAGE_TYPE:-}"
@@ -3121,12 +3133,13 @@ edit_advanced_parameters() {
   ATTENTION_BACKEND=$(prompt_optional "Attention backend" "${ATTENTION_BACKEND:-}") || return 0
   HF_OVERRIDES_JSON=$(prompt_optional "HF overrides JSON" "${HF_OVERRIDES_JSON:-}") || return 0
   ADDITIONAL_CONFIG_JSON=$(prompt_optional "Additional config JSON" "${ADDITIONAL_CONFIG_JSON:-}") || return 0
-  SPECULATIVE_METHOD=$(prompt_optional "Speculative method (empty/mtp/dflash)" "${SPECULATIVE_METHOD:-}") || return 0
+  SPECULATIVE_METHOD=$(prompt_optional "Speculative method (empty/mtp/dflash/dflash2)" "${SPECULATIVE_METHOD:-}") || return 0
   SPECULATIVE_MODEL=$(prompt_optional "Speculative draft model path or repo" "${SPECULATIVE_MODEL:-}") || return 0
   SPECULATIVE_TOKENS=$(prompt_optional "Speculative tokens" "${SPECULATIVE_TOKENS:-}") || return 0
   SPECULATIVE_DRAFT_TP_SIZE=$(prompt_optional "Speculative draft TP size" "${SPECULATIVE_DRAFT_TP_SIZE:-}") || return 0
   SPECULATIVE_MAX_MODEL_LEN=$(prompt_optional "Speculative draft max_model_len" "${SPECULATIVE_MAX_MODEL_LEN:-}") || return 0
   SPECULATIVE_ATTENTION_BACKEND=$(prompt_optional "Speculative draft attention backend" "${SPECULATIVE_ATTENTION_BACKEND:-}") || return 0
+  SPECULATIVE_KV_CACHE_DTYPE=$(prompt_optional "Speculative draft KV cache dtype" "${SPECULATIVE_KV_CACHE_DTYPE:-}") || return 0
   SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH=$(prompt_toggle01 "Disable padded drafter batch" "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}") || return 0
   SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION=$(prompt_toggle01 "Use local argmax reduction" "${SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION:-0}") || return 0
   SPECULATIVE_CONFIG=$(prompt_optional "Speculative config JSON" "${SPECULATIVE_CONFIG:-}") || return 0
@@ -3255,6 +3268,7 @@ clear_speculative_decode_settings() {
   SPECULATIVE_DRAFT_TP_SIZE=""
   SPECULATIVE_MAX_MODEL_LEN=""
   SPECULATIVE_ATTENTION_BACKEND=""
+  SPECULATIVE_KV_CACHE_DTYPE=""
   SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH=0
   SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION=0
   SPECULATIVE_CONFIG=""
@@ -3277,6 +3291,7 @@ configure_dflash_shortcut() {
   local attention_backend=${5:-}
   local disable_padded=${6:-0}
   local use_local_argmax=${7:-0}
+  local kv_cache_dtype=${8:-}
 
   clear_speculative_decode_settings
   SPECULATIVE_METHOD=dflash
@@ -3285,6 +3300,7 @@ configure_dflash_shortcut() {
   SPECULATIVE_DRAFT_TP_SIZE=$draft_tp
   SPECULATIVE_MAX_MODEL_LEN=$draft_max_model_len
   SPECULATIVE_ATTENTION_BACKEND=$attention_backend
+  SPECULATIVE_KV_CACHE_DTYPE=$kv_cache_dtype
   SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH=$disable_padded
   SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION=$use_local_argmax
 }
@@ -3298,10 +3314,10 @@ configure_speculative_json() {
 
 edit_speculative_decode_menu() {
   local current method_choice tokens default_tokens spec_json
-  local draft_model draft_tp draft_max_model_len attention_backend disable_padded use_local_argmax
+  local draft_model draft_tp draft_max_model_len attention_backend kv_cache_dtype disable_padded use_local_argmax
 
   current=$(current_speculative_label)
-  method_choice=$(menu_select "Spec decode" "$current" disabled mtp dflash raw-json) || return 0
+  method_choice=$(menu_select "Spec decode" "$current" disabled mtp dflash dflash2 raw-json) || return 0
 
   case "$method_choice" in
     disabled)
@@ -3315,16 +3331,17 @@ edit_speculative_decode_menu() {
       tokens=$(prompt_default "MTP speculative tokens" "$default_tokens") || return 0
       configure_mtp_shortcut "$tokens"
       ;;
-    dflash)
+    dflash|dflash2)
       default_tokens=$(effective_speculative_tokens)
       if [[ "$default_tokens" == "0" ]]; then
         default_tokens=${SPECULATIVE_TOKENS:-3}
       fi
-      draft_model=$(prompt_default "DFlash draft model path or repo" "$(effective_speculative_model)") || return 0
+      draft_model=$(prompt_default "DFlash2 draft model path or repo" "$(effective_speculative_model)") || return 0
       tokens=$(prompt_default "DFlash speculative tokens" "$default_tokens") || return 0
       draft_tp=$(prompt_optional "DFlash draft TP size" "${SPECULATIVE_DRAFT_TP_SIZE:-}") || return 0
       draft_max_model_len=$(prompt_optional "DFlash draft max_model_len" "${SPECULATIVE_MAX_MODEL_LEN:-}") || return 0
       attention_backend=$(prompt_optional "DFlash draft attention backend" "${SPECULATIVE_ATTENTION_BACKEND:-}") || return 0
+      kv_cache_dtype=$(prompt_default "DFlash draft KV cache dtype" "${SPECULATIVE_KV_CACHE_DTYPE:-float16}") || return 0
       disable_padded=$(prompt_toggle01 "Disable padded drafter batch" "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}") || return 0
       use_local_argmax=$(prompt_toggle01 "Use local argmax reduction" "${SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION:-0}") || return 0
       configure_dflash_shortcut \
@@ -3334,7 +3351,8 @@ edit_speculative_decode_menu() {
         "$draft_max_model_len" \
         "$attention_backend" \
         "$disable_padded" \
-        "$use_local_argmax"
+        "$use_local_argmax" \
+        "$kv_cache_dtype"
       ;;
     raw-json)
       spec_json=$(prompt_optional "Speculative config JSON" "${SPECULATIVE_CONFIG:-}") || return 0
@@ -4151,14 +4169,15 @@ build_generated_speculative_config() {
   local tokens=$2
   local backend=${3:-}
   local use_local_argmax=${4:-0}
+  local kv_cache_dtype=${SPECULATIVE_KV_CACHE_DTYPE:-}
 
   python3 - "$method" "$tokens" "${SPECULATIVE_MODEL:-}" \
     "${SPECULATIVE_DRAFT_TP_SIZE:-}" "${SPECULATIVE_MAX_MODEL_LEN:-}" \
-    "$backend" "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}" "$use_local_argmax" <<'PY'
+    "$backend" "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}" "$use_local_argmax" "$kv_cache_dtype" <<'PY'
 import json
 import sys
 
-method, tokens, model, draft_tp, max_model_len, backend, disable_padded, use_local_argmax = sys.argv[1:]
+method, tokens, model, draft_tp, max_model_len, backend, disable_padded, use_local_argmax, kv_cache_dtype = sys.argv[1:]
 
 cfg = {
     "method": method,
@@ -4173,6 +4192,8 @@ if method == "dflash":
         cfg["max_model_len"] = int(max_model_len)
     if backend:
         cfg["attention_backend"] = backend
+    if kv_cache_dtype:
+        cfg["kv_cache_dtype"] = kv_cache_dtype
     if disable_padded in {"1", "true", "True", "yes", "on"}:
         cfg["disable_padded_drafter_batch"] = True
 if use_local_argmax in {"1", "true", "True", "yes", "on"}:
@@ -4186,7 +4207,7 @@ validate_speculative_route() {
   local method tokens backend json_status
 
   if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
-    if [[ -n "${SPECULATIVE_METHOD:-}" || -n "${SPECULATIVE_MODEL:-}" || -n "${SPECULATIVE_TOKENS:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH || config_key_has_explicit_value SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION || ([[ "${MTP_K:-0}" =~ ^[0-9]+$ ]] && (( MTP_K > 0 ))); then
+    if [[ -n "${SPECULATIVE_METHOD:-}" || -n "${SPECULATIVE_MODEL:-}" || -n "${SPECULATIVE_TOKENS:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" || -n "${SPECULATIVE_KV_CACHE_DTYPE:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH || config_key_has_explicit_value SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION || ([[ "${MTP_K:-0}" =~ ^[0-9]+$ ]] && (( MTP_K > 0 ))); then
       echo "ERROR: SPECULATIVE_CONFIG must not be mixed with shortcut speculative fields or MTP_K." >&2
       return 1
     fi
@@ -4203,7 +4224,7 @@ validate_speculative_route() {
   tokens=$(effective_speculative_tokens)
 
   if [[ -z "$method" ]]; then
-    if [[ -n "${SPECULATIVE_MODEL:-}" || -n "${SPECULATIVE_TOKENS:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH || config_key_has_explicit_value SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION; then
+    if [[ -n "${SPECULATIVE_MODEL:-}" || -n "${SPECULATIVE_TOKENS:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" || -n "${SPECULATIVE_KV_CACHE_DTYPE:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH || config_key_has_explicit_value SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION; then
       echo "ERROR: speculative fields were set but SPECULATIVE_METHOD is missing." >&2
       echo "       Use SPECULATIVE_METHOD=mtp|dflash or provide SPECULATIVE_CONFIG." >&2
       return 1
@@ -4228,7 +4249,7 @@ validate_speculative_route() {
   fi
 
   if [[ "$method" == "mtp" ]]; then
-    if [[ -n "${SPECULATIVE_MODEL:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH; then
+    if [[ -n "${SPECULATIVE_MODEL:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" || -n "${SPECULATIVE_KV_CACHE_DTYPE:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH; then
       echo "ERROR: MTP launcher shortcut must not set DFlash-only speculative fields." >&2
       echo "       Clear SPECULATIVE_MODEL / draft-* fields or switch SPECULATIVE_METHOD=dflash." >&2
       return 1
