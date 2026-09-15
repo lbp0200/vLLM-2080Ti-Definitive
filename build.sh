@@ -195,7 +195,7 @@ run_build_network_preflight() {
   echo "Build preflight: benchmarking PyPI and Git routes..."
   for i in 0 1 2; do
     mode=${modes[$i]}; pypi_probe=${pypi_urls[$i]%/}/pip/
-    git_probe="${prefixes[$i]}${flashqla_repo#https://github.com/}/info/refs?service=git-upload-pack"
+    git_probe="${prefixes[$i]}${flashqla_repo}/info/refs?service=git-upload-pack"
     pypi_ms=$(measure_network_url_ms "$pypi_probe" "$BUILD_PREFLIGHT_SAMPLE_TIMEOUT_SECONDS" || echo 999999)
     git_ms=$(measure_network_url_ms "$git_probe" "$BUILD_PREFLIGHT_SAMPLE_TIMEOUT_SECONDS" || echo 999999)
     total=$((pypi_ms + git_ms))
