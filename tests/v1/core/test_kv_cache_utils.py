@@ -2994,6 +2994,252 @@ def _grouping_config():
     )
 
 
+def _dflash_aligned_hybrid_grouping_config():
+    return SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
+        scheduler_config=SimpleNamespace(
+            disable_hybrid_kv_cache_manager=False,
+            max_num_seqs=1,
+        ),
+        speculative_config=SimpleNamespace(
+            use_dflash=lambda: True,
+            use_eagle=lambda: False,
+            use_eagle_block_drop=lambda: False,
+            draft_model_config=SimpleNamespace(
+                architectures=["DFlash2DraftModel"],
+                hf_config=SimpleNamespace(
+                    num_hidden_layers=5,
+                    dflash_config={"target_layer_ids": [5, 19, 33, 47, 61]},
+                ),
+            ),
+        ),
+        model_config=SimpleNamespace(
+            get_num_layers=lambda parallel_config: 64,
+            get_total_num_hidden_layers=lambda: 64,
+            max_model_len=262144,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(
+            block_size=16,
+            enable_prefix_caching=True,
+            prefix_match_unit=None,
+            mamba_cache_mode="align",
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+        ),
+        kv_transfer_config=None,
+        max_in_flight_tokens=2560,
+    )
+
+
+def test_dflash2_aligned_hybrid_uses_independent_block_pools():
+    config = _dflash_aligned_hybrid_grouping_config()
+
+    assert kv_cache_utils._uses_native_dflash2(config)
+
+    config.speculative_config.draft_model_config.architectures = [
+        "DFlashDraftModel"
+    ]
+    assert not kv_cache_utils._uses_native_dflash2(config)
+
+    config.speculative_config.use_dflash = lambda: False
+    assert not kv_cache_utils._uses_native_dflash2(config)
+
+
+def test_dflash2_identity_falls_back_to_checkpoint_name():
+    config = _dflash_aligned_hybrid_grouping_config()
+    config.speculative_config.draft_model_config.architectures = [
+        "DFlashDraftModel"
+    ]
+    config.speculative_config.draft_model_config.model = (
+        "/models/Qwen3.8-27B-DFlash2"
+    )
+
+    assert kv_cache_utils._uses_native_dflash2(config)
+
+    config.speculative_config.draft_model_config.model = "/models/Qwen3-DFlash"
+    assert not kv_cache_utils._uses_native_dflash2(config)
+
+
+def test_dflash_aligned_hybrid_uses_native_draft_pages():
+    """DFlash keeps compact FP16 pages next to aligned hybrid target KV."""
+    target_block_size = 2160
+    target_page_size = target_block_size * 776
+    target_spec = FullAttentionSpec(
+        block_size=target_block_size,
+        num_kv_heads=1,
+        head_size=388,
+        dtype=torch.uint8,
+    )
+    mamba_spec = new_mamba_spec(
+        block_size=target_block_size,
+        shapes=((target_page_size,),),
+        dtypes=(torch.uint8,),
+        mamba_cache_mode="align",
+    )
+    draft_spec = new_sliding_window_spec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.float16,
+        sliding_window=2048,
+    )
+    specs = {
+        **{f"model.layers.{i}.full_attn": target_spec for i in range(16)},
+        **{f"model.layers.{i}.linear_attn": mamba_spec for i in range(16, 64)},
+        **{f"model.layers.{i}.self_attn.attn": draft_spec for i in range(64, 69)},
+    }
+    config = _dflash_aligned_hybrid_grouping_config()
+
+    groups = get_kv_cache_groups(config, specs)
+    draft_layer_names = {f"model.layers.{i}.self_attn.attn" for i in range(64, 69)}
+    draft_groups = [
+        group for group in groups if set(group.layer_names) & draft_layer_names
+    ]
+    assert len(draft_groups) == len(draft_layer_names)
+    assert {group.layer_names[0] for group in draft_groups} == draft_layer_names
+    assert all(len(group.layer_names) == 1 for group in draft_groups)
+    assert all(
+        isinstance(group.kv_cache_spec, SlidingWindowSpec) for group in draft_groups
+    )
+    assert all(group.kv_cache_spec.block_size == 720 for group in draft_groups)
+    assert all(group.kv_cache_spec.page_size_padded is None for group in draft_groups)
+    assert all(
+        group.kv_cache_spec.page_size_bytes < target_page_size for group in draft_groups
+    )
+    assert config.cache_config.prefix_match_unit == 16
+
+    target_only_specs = {
+        name: spec for name, spec in specs.items() if name not in draft_layer_names
+    }
+    target_only_groups = get_kv_cache_groups(config, target_only_specs)
+    available_memory = target_page_size * 16 * 1024
+    target_only_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, target_only_groups, available_memory
+    )
+    dflash_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, groups, available_memory
+    )
+
+    scheduler_block_size, hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(
+        dflash_config, config
+    )
+    assert (scheduler_block_size, hash_block_size) == (2160, 16)
+    assert any(
+        "model.layers.64.self_attn.attn" in tensor.layers
+        for tensor in dflash_config.kv_cache_tensors
+    )
+    assert dflash_config.num_blocks_per_group is not None
+    target_group_id = next(
+        group_id
+        for group_id, group in enumerate(dflash_config.kv_cache_groups)
+        if "model.layers.3.full_attn" in group.layer_names
+    )
+    draft_group_id = next(
+        group_id
+        for group_id, group in enumerate(dflash_config.kv_cache_groups)
+        if "model.layers.64.self_attn.attn" in group.layer_names
+    )
+    assert (
+        dflash_config.num_blocks_for_group(target_group_id)
+        > dflash_config.num_blocks_for_group(draft_group_id)
+    )
+
+    target_capacity, _ = get_kv_cache_capacity(config, target_only_config)
+    dflash_capacity, _ = get_kv_cache_capacity(config, dflash_config)
+    assert dflash_capacity >= target_capacity * 0.70
+
+
+def test_dflash_aligned_hybrid_identifies_local_draft_layer_names():
+    """DFlash still separates the draft cache when its KV name is local."""
+    target_block_size = 2160
+    target_page_size = target_block_size * 776
+    target_spec = FullAttentionSpec(
+        block_size=target_block_size,
+        num_kv_heads=1,
+        head_size=388,
+        dtype=torch.uint8,
+    )
+    mamba_spec = new_mamba_spec(
+        block_size=target_block_size,
+        shapes=((target_page_size,),),
+        dtypes=(torch.uint8,),
+        mamba_cache_mode="align",
+    )
+    draft_spec = new_sliding_window_spec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.float16,
+        sliding_window=2048,
+    )
+    specs = {
+        **{f"model.layers.{i}.full_attn": target_spec for i in range(16)},
+        **{f"model.layers.{i}.linear_attn": mamba_spec for i in range(16, 64)},
+        **{f"draft.layers.{i}.self_attn.attn": draft_spec for i in range(5)},
+    }
+
+    config = _dflash_aligned_hybrid_grouping_config()
+    config.speculative_config.use_eagle_block_drop = lambda: True
+    groups = get_kv_cache_groups(config, specs)
+    draft_layer_names = {f"draft.layers.{i}.self_attn.attn" for i in range(5)}
+    draft_groups = [
+        group for group in groups if set(group.layer_names) & draft_layer_names
+    ]
+    assert len(draft_groups) == len(draft_layer_names)
+    assert {group.layer_names[0] for group in draft_groups} == draft_layer_names
+    assert all(
+        isinstance(group.kv_cache_spec, SlidingWindowSpec) for group in draft_groups
+    )
+    assert all(group.kv_cache_spec.block_size == 720 for group in draft_groups)
+    assert all(group.kv_cache_spec.page_size_padded is None for group in draft_groups)
+    assert all(group.is_eagle_group for group in draft_groups)
+
+
+def test_dflash_aligned_hybrid_keeps_large_draft_pages_unmerged():
+    """Each large FP16 DFlash page must retain its own pool block."""
+    target_block_size = 2160
+    target_page_size = target_block_size * 776
+    target_spec = FullAttentionSpec(
+        block_size=target_block_size,
+        num_kv_heads=1,
+        head_size=388,
+        dtype=torch.uint8,
+    )
+    mamba_spec = new_mamba_spec(
+        block_size=target_block_size,
+        shapes=((target_page_size,),),
+        dtypes=(torch.uint8,),
+        mamba_cache_mode="align",
+    )
+    # Matches the real DFlash2 route: 4 KV heads per TP rank, 128-wide FP16
+    # K and V, and the target's 2160-token aligned manager block.
+    draft_spec = new_sliding_window_spec(
+        block_size=target_block_size,
+        num_kv_heads=4,
+        head_size=128,
+        dtype=torch.float16,
+        sliding_window=2048,
+    )
+    draft_layer_names = [f"model.layers.{i}.self_attn.attn" for i in range(64, 69)]
+    specs = {
+        "model.layers.3.self_attn.attn": target_spec,
+        "model.layers.0.linear_attn": mamba_spec,
+        **{name: draft_spec for name in draft_layer_names},
+    }
+
+    groups = get_kv_cache_groups(_dflash_aligned_hybrid_grouping_config(), specs)
+    draft_groups = [
+        group for group in groups if set(group.layer_names) & set(draft_layer_names)
+    ]
+    assert len(draft_groups) == len(draft_layer_names)
+    assert {group.layer_names[0] for group in draft_groups} == set(draft_layer_names)
+    assert all(len(group.layer_names) == 1 for group in draft_groups)
+    assert draft_spec.page_size_bytes > target_page_size
+    assert kv_cache_utils._pool_bytes_per_block(groups) == draft_spec.page_size_bytes
+
+
 def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
     block_size = 544
     full_spec = FullAttentionSpec(

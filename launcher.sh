@@ -289,6 +289,7 @@ ROUTE_PROFILE_KEYS=(
   MODEL_VARIANT
   QUANTIZATION
   KV_CACHE_DTYPE
+  VLLM_KV_CACHE_LAYOUT
   MAX_MODEL_LEN
   KV_CACHE_MEMORY_BYTES
   GPU_UTIL
@@ -297,7 +298,9 @@ ROUTE_PROFILE_KEYS=(
   LONG_PREFILL_TOKEN_THRESHOLD
   PREFILL_BATCH_BARRIER
   DISABLE_PREFIX_CACHING
+  MAMBA_CACHE_MODE
   MTP_K
+  PER_REQUEST_SPEC_DECODE_METRICS
   MESSAGE_TYPE
   MM_LIMIT_JSON
   LANGUAGE_MODEL_ONLY
@@ -589,7 +592,7 @@ reset_route_profile_fields() {
 
 profile_key_is_global() {
   case "$1" in
-MODEL_DIR|PROFILE_DIR|PROFILE|MODE|PORT|SERVICE_SCOPE|GPU_DEVICES|TP_SIZE|PP_SIZE|\
+MODEL_DIR|PROFILE_DIR|PROFILE|MODE|PORT|SERVICE_SCOPE|GPU_DEVICES|PP_SIZE|\
 CHAT_TEMPLATE_FILE|CHAT_TEMPLATE_PRESET|TEMPLATE_DIR|REASONING_PARSER|\
 DEFAULT_CHAT_TEMPLATE_KWARGS|REASONING_MODE|REASONING_BUDGET|\
 ENABLE_AUTO_TOOL_CHOICE|TOOL_CALL_PARSER|TOOL_PARSER_PLUGIN|\
@@ -709,6 +712,7 @@ save_manager_state() {
     printf 'PREFILL_BATCH_BARRIER=%q\n' "${PREFILL_BATCH_BARRIER:-0}"
     printf 'DISABLE_PREFIX_CACHING=%q\n' "${DISABLE_PREFIX_CACHING:-0}"
     printf 'MTP_K=%q\n' "${MTP_K:-}"
+    printf 'PER_REQUEST_SPEC_DECODE_METRICS=%q\n' "${PER_REQUEST_SPEC_DECODE_METRICS:-}"
     printf 'VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE=%q\n' "${VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE:-}"
     printf 'VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS=%q\n' "${VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS:-}"
     printf 'VLLM_TURBOQUANT_MAX_KV_SPLITS=%q\n' "${VLLM_TURBOQUANT_MAX_KV_SPLITS:-}"
@@ -1248,6 +1252,7 @@ profile_summary() {
     MAX_BATCHED_TOKENS
     MAX_NUM_SEQS
     MTP_K
+    PER_REQUEST_SPEC_DECODE_METRICS
     VLLM_ALLOW_LONG_MAX_MODEL_LEN
     MM_LIMIT_JSON
     HF_OVERRIDES_JSON
@@ -3489,13 +3494,40 @@ build_args() {
   fi
   [[ -n "${CHAT_TEMPLATE_FILE:-}" ]] && VLLM_ARGS+=(--chat-template "$CHAT_TEMPLATE_FILE")
 
-  local decode_query_len=$((MTP_K + 1))
+  # An explicit drafter config takes precedence over MTP_K.  The graph shapes
+  # must cover the target verifier's full query width: DFlash's seven drafted
+  # tokens plus its bonus token are an eight-token decode, not a B=1 decode.
+  local num_speculative_tokens=${MTP_K:-0}
+  if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
+    if [[ "${SPECULATIVE_CONFIG}" == \{* ]]; then
+      local parsed_speculative_tokens
+      parsed_speculative_tokens=$(
+        "$RUNTIME_ROOT/.venv/bin/python" -c '
+import json
+import sys
+
+value = json.loads(sys.argv[1]).get("num_speculative_tokens", 0)
+if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    raise ValueError("num_speculative_tokens must be a non-negative integer")
+print(value)
+' "$SPECULATIVE_CONFIG" 2>/dev/null
+      ) || die "SPECULATIVE_CONFIG has an invalid num_speculative_tokens value."
+      num_speculative_tokens=$parsed_speculative_tokens
+    else
+      # File-backed configs are parsed by vLLM. Keep the historical B=1
+      # fallback here because their contents are not available to the launcher.
+      num_speculative_tokens=0
+    fi
+  fi
+  local decode_query_len=$((num_speculative_tokens + 1))
   local decode_max_tokens=$((MAX_NUM_SEQS * decode_query_len))
   if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
     VLLM_ARGS+=(--speculative-config "$SPECULATIVE_CONFIG")
   elif (( MTP_K > 0 )); then
     VLLM_ARGS+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_K}}")
   fi
+  [[ -n "${PER_REQUEST_SPEC_DECODE_METRICS:-}" ]] && \
+    VLLM_ARGS+=(--per-request-spec-decode-metrics "$PER_REQUEST_SPEC_DECODE_METRICS")
 
   local cudagraph_mode
   case "$MODE" in

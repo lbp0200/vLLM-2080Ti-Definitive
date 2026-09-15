@@ -351,6 +351,14 @@ class CacheConfig:
 
     def get_resolved_kv_cache_layout(self) -> KVCacheLayout:
         if self.kv_cache_layout is None:
+            # Workers may initialize backend objects before the engine-core
+            # layout RPC reaches them. Honor the explicit environment choice
+            # as a deterministic fallback in that startup window.
+            from vllm import envs
+
+            if envs.VLLM_KV_CACHE_LAYOUT is not None:
+                self.kv_cache_layout = envs.VLLM_KV_CACHE_LAYOUT
+                return _layout_from_name(self.kv_cache_layout)
             raise ValueError(
                 "KV cache layout has not been resolved yet; it is resolved once "
                 "by the engine core (resolve_kv_cache_layout) unless explicitly "

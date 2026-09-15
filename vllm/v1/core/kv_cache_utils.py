@@ -1080,6 +1080,26 @@ def get_max_concurrency_for_kv_cache_config(
 
     Host groups use a separate pool; the smaller concurrency limit applies.
     """
+    if kv_cache_config.independent_block_pools:
+        # Every group owns a separate block-ID namespace and physical region.
+        # A request must fit in *each* pool, not in their aggregate. Summing
+        # the requirements here recreates the shared-pool accounting bug that
+        # limited DFlash2 to roughly one sixth of its KV capacity.
+        limits = []
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+            if group.host_resident:
+                continue
+            required = cdiv(
+                group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+                group.kv_cache_spec.page_size_bytes,
+            )
+            if required:
+                limits.append(
+                    kv_cache_config.num_blocks_for_group(group_id) / required
+                )
+        assert limits
+        return min(limits)
+
     num_blocks_per_request = 0
     host_blocks_per_request = 0
     for group in kv_cache_config.kv_cache_groups:
@@ -1110,14 +1130,84 @@ def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
     return num_blocks
 
 
-def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
+def _pool_bytes_per_block(
+    kv_cache_groups: list[KVCacheGroupSpec],
+    *,
+    independent_block_pools: bool = False,
+) -> int:
     """
     Bytes consumed by one block in the worker's shared KV cache pool, mirroring
     the divisor used by `get_kv_cache_config_from_groups` to convert
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
     capacity once `num_gpu_blocks_override` is applied.
     """
+    if independent_block_pools:
+        # One logical ID is addressable in every group. The physical backing
+        # therefore reserves one page for every concrete layer, not the
+        # largest overlaid shared-pool slab.
+        return sum(
+            _get_per_layer_spec(group, layer_name).page_size_bytes
+            for group in kv_cache_groups
+            for layer_name in group.layer_names
+        )
     return _get_kv_cache_bytes_per_block(kv_cache_groups)
+
+
+def _group_page_bytes(group: KVCacheGroupSpec) -> int:
+    """Return the physical bytes for one block in a KV-cache group."""
+    return sum(
+        _get_per_layer_spec(group, layer_name).page_size_bytes
+        for layer_name in group.layer_names
+    )
+
+
+def _dflash_group_capacities(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> tuple[int, ...]:
+    """Plan independent DFlash2 pools against the shared allocation budget."""
+    requirements = [
+        cdiv(
+            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+            group.kv_cache_spec.page_size_bytes,
+        )
+        for group in kv_cache_groups
+    ]
+    page_bytes = [_group_page_bytes(group) for group in kv_cache_groups]
+    null_bytes = sum(page_bytes)
+    required_bytes = sum(req * page for req, page in zip(requirements, page_bytes))
+    if required_bytes + null_bytes > available_memory:
+        raise ValueError(
+            "Insufficient memory for the requested DFlash2 KV cache groups: "
+            f"need {required_bytes + null_bytes} bytes, have {available_memory}."
+        )
+
+    usable_memory = available_memory - null_bytes
+    if required_bytes:
+        capacities = [
+            max(req, (req * usable_memory) // required_bytes) + 1
+            if req
+            else 1
+            for req in requirements
+        ]
+    else:
+        capacities = [1] * len(requirements)
+    # Integer rounding can leave a few bytes over budget. Remove only blocks
+    # beyond the request minimum; every pool must retain its null block.
+    while sum(
+        cap * page for cap, page in zip(capacities, page_bytes)
+    ) > available_memory:
+        candidates = [
+            i
+            for i, (cap, req) in enumerate(zip(capacities, requirements))
+            if cap > req + 1
+        ]
+        if not candidates:
+            break
+        index = max(candidates, key=lambda i: page_bytes[i])
+        capacities[index] -= 1
+    return tuple(capacities)
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
@@ -1649,6 +1739,7 @@ def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
+    num_blocks_per_group: tuple[int, ...] | None = None,
 ) -> KVCacheConfig:
     """
     Generate the KV cache configuration from the KV cache groups and spec
@@ -1677,6 +1768,62 @@ def get_kv_cache_config_from_groups(
         host_budget = get_hisparse_host_pool_bytes(vllm_config)
         return get_hisparse_kv_cache_config(
             vllm_config, kv_cache_groups, available_memory, host_budget
+        )
+
+    if _uses_native_dflash2(vllm_config):
+        # DFlash2's target and draft cache block tables are independent: the
+        # draft writes its KV at its own absolute slots, so overlaid pages
+        # would corrupt target KV. Nightly nevertheless requires every
+        # KVCacheTensor to describe one backing allocation. Reserve a distinct
+        # region for every layer within that allocation while giving every KV
+        # group its own block-ID pool.
+        layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+        validate_kv_cache_layout(layout, kv_cache_groups)
+        if num_blocks_per_group is None and (
+            vllm_config.cache_config.num_gpu_blocks_override is not None
+        ):
+            override = vllm_config.cache_config.num_gpu_blocks_override
+            num_blocks_per_group = tuple(override for _ in kv_cache_groups)
+        if num_blocks_per_group is None:
+            num_blocks_per_group = _dflash_group_capacities(
+                vllm_config, kv_cache_groups, available_memory
+            )
+        if len(num_blocks_per_group) != len(kv_cache_groups):
+            raise ValueError("DFlash2 group capacities must match KV cache groups")
+        num_blocks = max(num_blocks_per_group, default=1)
+        total_size = sum(
+            capacity * _group_page_bytes(group)
+            for capacity, group in zip(num_blocks_per_group, kv_cache_groups)
+        )
+
+        kv_cache_tensors: list[KVCacheTensor] = []
+        offset = 0
+        for group_id, group in enumerate(kv_cache_groups):
+            for layer_name in group.layer_names:
+                spec = _get_per_layer_spec(group, layer_name)
+                page_size = spec.page_size_bytes
+                kv_cache_tensors.append(
+                    KVCacheTensor(
+                        size=total_size,
+                        layers=[layer_name],
+                        # A tensor describes one layer, so the layer stride is
+                        # immaterial. Keep it page-sized for a compact view.
+                        layer_stride=page_size,
+                        block_stride=page_size,
+                        offset=offset,
+                    )
+                )
+                offset += page_size * num_blocks_per_group[group_id]
+        assert offset == total_size
+        return KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+            independent_block_pools=True,
+            num_blocks_per_group=num_blocks_per_group,
+            prefix_cache_retention_interval=(
+                vllm_config.cache_config.prefix_cache_retention_interval
+            ),
         )
 
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
@@ -2227,6 +2374,240 @@ def _largest_divisor_at_most(value: int, limit: int) -> int:
     return 1
 
 
+def _uses_native_dflash2(vllm_config: VllmConfig) -> bool:
+    """Whether the loaded DFlash draft needs DFlash2's separate KV pools."""
+    speculative_config = vllm_config.speculative_config
+    use_dflash = getattr(speculative_config, "use_dflash", None)
+    if speculative_config is None or not callable(use_dflash) or not use_dflash():
+        return False
+
+    draft_model_config = getattr(speculative_config, "draft_model_config", None)
+    if draft_model_config is None:
+        return False
+    architectures = getattr(draft_model_config, "architectures", ()) or ()
+    if "DFlash2DraftModel" in architectures:
+        return True
+    # The architecture can be normalized away when the draft config is loaded
+    # through the speculative-model registry. Keep the explicit DFlash2 model
+    # identity as a fallback without classifying ordinary DFlash checkpoints.
+    model = str(getattr(draft_model_config, "model", ""))
+    return "dflash2" in model.lower()
+
+
+def _get_dflash_draft_layer_names(
+    vllm_config: VllmConfig,
+    layer_names: Iterable[str],
+    kv_cache_specs: dict[str, KVCacheSpec] | None = None,
+) -> set[str]:
+    """Return the KV layers registered by a DFlash draft model.
+
+    DFlash is loaded after the target model and consequently keeps the target
+    layer namespace while continuing its layer indices. This is the stable
+    contract used by the proposer when it maps draft attention groups back to
+    the draft decoder layers. The KV registry can be built with a model-local
+    namespace, however. For the Qwen3.8 aligned-hybrid route, recognize that
+    form only when its exact number of DFlash draft layers are the only
+    sliding-window specs next to an aligned Mamba target cache.
+    """
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or not spec_config.use_dflash():
+        return set()
+
+    draft_config = spec_config.draft_model_config
+    if draft_config is None:
+        return set()
+    draft_num_layers = getattr(draft_config.hf_config, "num_hidden_layers", 0)
+    if draft_num_layers <= 0:
+        return set()
+
+    # DFlashQwen3ForCausalLM passes get_total_num_hidden_layers() as
+    # start_layer_id. Using the per-pipeline-stage count is incorrect when PP
+    # is enabled, and makes the positional lookup miss valid draft layers.
+    target_num_layers = vllm_config.model_config.get_total_num_hidden_layers()
+    draft_layer_prefixes = tuple(
+        f".layers.{layer_id}."
+        for layer_id in range(target_num_layers, target_num_layers + draft_num_layers)
+    )
+    registered_layer_names = set(layer_names)
+    positional_draft_layer_names = {
+        layer_name
+        for layer_name in registered_layer_names
+        if any(prefix in layer_name for prefix in draft_layer_prefixes)
+    }
+    if len(positional_draft_layer_names) == draft_num_layers:
+        return positional_draft_layer_names
+
+    if kv_cache_specs is None:
+        return set()
+
+    sliding_draft_layer_names = {
+        layer_name
+        for layer_name, layer_spec in kv_cache_specs.items()
+        if layer_name in registered_layer_names
+        and isinstance(layer_spec, SlidingWindowSpec)
+    }
+    if len(sliding_draft_layer_names) != draft_num_layers:
+        return set()
+
+    # A target with its own sliding layers is ambiguous. The DFlash2 Qwen
+    # target has no sliding specs, so an exact draft-sized sliding subset is
+    # sufficient to identify the five draft layers even when Mamba alignment
+    # has already been normalized away by the backend.
+    target_has_sliding = any(
+        isinstance(layer_spec, SlidingWindowSpec)
+        for layer_name, layer_spec in kv_cache_specs.items()
+        if layer_name in registered_layer_names
+        and layer_name not in sliding_draft_layer_names
+    )
+    if target_has_sliding:
+        return set()
+
+    logger.info(
+        "DFlash KV layer names matched only %d/%d expected global layers; "
+        "using the unambiguous %d-layer sliding-window draft shape next to "
+        "the aligned Mamba target cache.",
+        len(positional_draft_layer_names),
+        draft_num_layers,
+        draft_num_layers,
+    )
+    return sliding_draft_layer_names
+
+
+def _coarsen_dflash_aligned_draft_pages(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> dict[str, KVCacheSpec]:
+    """Align DFlash manager blocks without inflating their FP16 cache pages.
+
+    Qwen3.8's compressed target cache uses large Mamba-aligned manager blocks,
+    while DFlash uses a small FP16 sliding-window cache. Padding every 16-token
+    DFlash page to the target page creates hundreds of unnecessary block-table
+    entries and makes a 256K service fail admission. Keep the draft physical
+    page native, but use the largest draft block that divides the target's
+    manager alignment so both groups can share the block pool efficiently.
+    """
+    draft_layer_names = _get_dflash_draft_layer_names(
+        vllm_config, kv_cache_spec.keys(), kv_cache_spec
+    )
+    if not draft_layer_names:
+        return kv_cache_spec
+
+    target_specs = [
+        spec for name, spec in kv_cache_spec.items() if name not in draft_layer_names
+    ]
+    if not target_specs or not any(
+        isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "align"
+        for spec in target_specs
+    ):
+        return kv_cache_spec
+
+    target_block_alignment = math.gcd(*(spec.block_size for spec in target_specs))
+    if target_block_alignment <= 0:
+        return kv_cache_spec
+    target_page_size = max(spec.page_size_bytes for spec in target_specs)
+
+    updated_specs = kv_cache_spec.copy()
+    original_draft_block_sizes: list[int] = []
+    for layer_name in draft_layer_names:
+        draft_spec = kv_cache_spec[layer_name]
+        if not isinstance(draft_spec, SlidingWindowSpec):
+            continue
+        if draft_spec.block_size >= target_block_alignment:
+            continue
+
+        max_factor = target_page_size // draft_spec.real_page_size_bytes
+        if max_factor <= 1:
+            continue
+        new_block_size = draft_spec.block_size
+        for factor in range(2, max_factor + 1):
+            candidate = draft_spec.block_size * factor
+            if target_block_alignment % candidate == 0:
+                new_block_size = candidate
+        if new_block_size == draft_spec.block_size:
+            continue
+
+        original_draft_block_sizes.append(draft_spec.block_size)
+        updated_specs[layer_name] = replace(draft_spec, block_size=new_block_size)
+        logger.info(
+            "Coarsening DFlash draft KV manager blocks from %d to %d tokens "
+            "to share the aligned hybrid target page.",
+            draft_spec.block_size,
+            new_block_size,
+        )
+
+    cache_config = vllm_config.cache_config
+    if original_draft_block_sizes and cache_config.prefix_match_unit is None:
+        prefix_match_unit = math.gcd(*original_draft_block_sizes)
+        if all(
+            spec.block_size % prefix_match_unit == 0 for spec in updated_specs.values()
+        ):
+            cache_config.prefix_match_unit = prefix_match_unit
+            logger.info(
+                "Keeping %d-token DFlash prefix-cache matching after KV "
+                "manager block coarsening.",
+                prefix_match_unit,
+            )
+
+    return updated_specs
+
+
+def _try_get_dflash_native_groups(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec] | None:
+    """Keep DFlash's FP16 sliding cache separate from hybrid target pages."""
+    draft_layer_names = _get_dflash_draft_layer_names(
+        vllm_config, kv_cache_spec.keys(), kv_cache_spec
+    )
+    if not draft_layer_names:
+        return None
+
+    target_specs = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if name not in draft_layer_names
+    }
+    draft_specs = {name: kv_cache_spec[name] for name in draft_layer_names}
+    if not target_specs or not all(
+        isinstance(spec, SlidingWindowSpec) for spec in draft_specs.values()
+    ):
+        return None
+    if not any(
+        isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "align"
+        for spec in target_specs.values()
+    ):
+        return None
+
+    try:
+        target_groups = _get_kv_cache_groups_uniform_page_size(
+            unify_kv_cache_spec_page_size(target_specs)
+        )
+        # The DFlash proposer already handles one metadata/block-table pair
+        # per draft layer. Keep those layers separate here: grouping all five
+        # FP16 pages together makes their sum the shared pool's block width,
+        # multiplying every target block's allocation by the draft depth.
+        draft_groups = create_kv_cache_group_specs(
+            kv_cache_spec, [[name] for name in draft_specs]
+        )
+    except (AssertionError, NotImplementedError, ValueError):
+        return None
+
+    # DFlash also writes a speculative lookahead token, so only its cache
+    # group needs EAGLE's trailing-block handling. Leaving all target groups
+    # unmarked makes aligned Mamba prefix reuse impossible.
+    if vllm_config.speculative_config.use_eagle_block_drop():
+        for draft_group in draft_groups:
+            draft_group.is_eagle_group = True
+
+    logger.info(
+        "Allocating DFlash draft KV in %d native %d-token manager groups; "
+        "its FP16 pages remain independent from target aligned pages.",
+        len(draft_groups),
+        draft_groups[0].kv_cache_spec.block_size,
+    )
+    return [*target_groups, *draft_groups]
+
+
 def get_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -2251,6 +2632,13 @@ def get_kv_cache_groups(
 
     if hisparse_groups := get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec):
         return hisparse_groups
+
+    # DFlash's FP16 sliding pages must not be padded to the target's aligned
+    # TurboQuant/Mamba page. Do this before the generic mixed-page grouping,
+    # which correctly cannot infer the DFlash proposer block-table contract.
+    kv_cache_spec = _coarsen_dflash_aligned_draft_pages(vllm_config, kv_cache_spec)
+    if dflash_groups := _try_get_dflash_native_groups(vllm_config, kv_cache_spec):
+        return dflash_groups
 
     if is_kv_cache_spec_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
@@ -2327,8 +2715,15 @@ def generate_scheduler_kv_cache_config(
     Generate the KV cache configuration for the scheduler.
     """
     assert all(
-        [cfg.num_blocks == kv_cache_configs[0].num_blocks for cfg in kv_cache_configs]
+        cfg.num_blocks == kv_cache_configs[0].num_blocks
+        for cfg in kv_cache_configs
     )
+    if kv_cache_configs[0].independent_block_pools:
+        assert all(
+            cfg.num_blocks_per_group == kv_cache_configs[0].num_blocks_per_group
+            for cfg in kv_cache_configs
+        )
+
     assert all(
         cfg.hisparse_host_num_blocks == kv_cache_configs[0].hisparse_host_num_blocks
         for cfg in kv_cache_configs
@@ -2395,6 +2790,18 @@ def _max_memory_usage_bytes_from_groups(
 
     if vllm_config.attention_config.hisparse_config is not None:
         return get_hisparse_gpu_memory_usage(vllm_config, kv_cache_groups)
+
+    if _uses_native_dflash2(vllm_config):
+        # Each group owns a physical pool, so memory is the sum of each
+        # group's page bytes times that group's request requirement.
+        return sum(
+            cdiv(
+                group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+                group.kv_cache_spec.page_size_bytes,
+            )
+            * _group_page_bytes(group)
+            for group in kv_cache_groups
+        )
 
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         (
@@ -2602,8 +3009,7 @@ def _turboquant_prefill_workspace_reserve_bytes(vllm_config: VllmConfig) -> int:
     scheduler_config = vllm_config.scheduler_config
     if not (
         scheduler_config.enable_chunked_prefill
-        and scheduler_config.max_num_batched_tokens
-        > _TQ_CONTINUATION_DECODE_THRESHOLD
+        and scheduler_config.max_num_batched_tokens > _TQ_CONTINUATION_DECODE_THRESHOLD
     ):
         return 0
 
@@ -2690,6 +3096,7 @@ def get_kv_cache_configs(
     # hybrid models when disable_hybrid_kv_cache_manager is enabled.
     # After this call, merged_kv_cache_specs may be modified in-place.
     global_kv_cache_groups = get_kv_cache_groups(vllm_config, merged_kv_cache_specs)
+    independent_block_pools = _uses_native_dflash2(vllm_config)
 
     # If original_max_model_len was -1, automatically
     # determine the maximum model length that fits in available GPU memory.
@@ -2726,7 +3133,9 @@ def get_kv_cache_configs(
             if not groups:
                 adjusted_memory.append(avail_mem)
                 continue
-            bytes_per_block = _pool_bytes_per_block(groups)
+            bytes_per_block = _pool_bytes_per_block(
+                groups, independent_block_pools=independent_block_pools
+            )
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
                 avail_mem // bytes_per_block,
@@ -2742,7 +3151,14 @@ def get_kv_cache_configs(
     # the capacity check both plan against usable blocks. Allocation below
     # still uses the full memory.
     check_memory = [
-        avail_mem - _pool_bytes_per_block(groups) if groups else avail_mem
+        avail_mem
+        - (
+            sum(_group_page_bytes(group) for group in groups)
+            if independent_block_pools
+            else _pool_bytes_per_block(groups)
+        )
+        if groups
+        else avail_mem
         for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
     ]
 
@@ -2776,17 +3192,46 @@ def get_kv_cache_configs(
     # Change the num_blocks of each rank to the smallest among all ranks.
     # We also need to shrink the tensor size proportionally to avoid
     # allocating unused memory.
-    min_num_blocks = min(
-        kv_cache_config.num_blocks for kv_cache_config in kv_cache_configs
-    )
+    if independent_block_pools:
+        min_num_blocks_per_group = tuple(
+            min(
+                config.num_blocks_for_group(group_id)
+                for config in kv_cache_configs
+            )
+            for group_id in range(len(kv_cache_configs[0].kv_cache_groups))
+        )
+        min_num_blocks = max(min_num_blocks_per_group, default=1)
+    else:
+        min_num_blocks_per_group = None
+        min_num_blocks = min(
+            kv_cache_config.num_blocks for kv_cache_config in kv_cache_configs
+        )
     for i, kv_cache_config in enumerate(kv_cache_configs):
-        if kv_cache_config.num_blocks == min_num_blocks:
+        if (
+            kv_cache_config.num_blocks == min_num_blocks
+            and (
+                not independent_block_pools
+                or kv_cache_config.num_blocks_per_group == min_num_blocks_per_group
+            )
+        ):
             continue
         # Re-plan with exactly the memory the smallest rank can afford, so
         # strides and offsets stay consistent with the shrunken allocation.
         groups = kv_cache_config.kv_cache_groups
         kv_cache_configs[i] = get_kv_cache_config_from_groups(
-            vllm_config, groups, min_num_blocks * _pool_bytes_per_block(groups)
+            vllm_config,
+            groups,
+            (
+                sum(
+                    capacity * _group_page_bytes(group)
+                    for capacity, group in zip(
+                        min_num_blocks_per_group, groups
+                    )
+                )
+                if independent_block_pools
+                else min_num_blocks * _pool_bytes_per_block(groups)
+            ),
+            num_blocks_per_group=min_num_blocks_per_group,
         )
 
     return kv_cache_configs
