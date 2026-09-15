@@ -3,10 +3,11 @@
 
 ![vLLM 2080 Ti Definitive Edition cover](docs/assets/vllm-2080ti-cover.jpg)
 
-Hardware-focused vLLM distribution for dual RTX 2080 Ti 22 GB / SM75 serving. The `vllm-2080ti-definitive-0.2.x` branch is the maintained CUDA 13.0 / PyTorch 2.13 runtime line for this hardware. It is aligned to upstream vLLM commit [`b23433088b`](https://github.com/vllm-project/vllm/commit/b23433088bf29980d20dff1bd64c753dd8883506) (`v0.29.1rc0-33`). The `0.1.x` line remains available for systems that require CUDA 12.8 and PyTorch 2.11.
+The definitive vLLM runtime for dual RTX 2080 Ti and multi-GPU Tesla T10 serving.
 
-This project preserves the SM75-specific source changes, launcher profiles,
-and validation evidence needed to reproduce the dual-2080-Ti TP=2 stack. It is
+This hardware-focused fork preserves the SM75-specific source changes, launcher
+profiles, and validation evidence needed to reproduce these Turing inference
+stacks. It is
 based on upstream vLLM; retain both the upstream license and attribution to
 `github.com/weicj` when redistributing a derivative.
 
@@ -40,6 +41,11 @@ for serious local 27B and 35B-class serving rather than only small-model use.
 The fork turns those hardware properties into a usable serving stack through
 Marlin, FlashInfer/FlashQLA, TurboQuant/INT8 KV, MTP, and CUDA Graph support.
 
+The second supported hardware family is four 16 GiB Tesla T10 GPUs over PCIe.
+Those profiles target TP=4 Qwen 27B serving, including 256K-context text and
+image routes. They use the ABI-matched PCIe custom all-reduce extension and are
+documented in the [T10 Profile Guide](profiles/4xT10/README.md).
+
 ## Support Status
 
 The `0.2.x` target is Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15, CUDA 13.0, and PyTorch 2.13. The maintained `0.1.x` line remains the compatibility route for CUDA 12.8, PyTorch 2.11, older kernels, and GCC 12/13/14.
@@ -52,9 +58,9 @@ their corresponding profile documentation includes completed validation.
 
 The launcher supports selecting tensor parallelism (`TP_SIZE`) and pipeline
 parallelism (`PP_SIZE`), including mixed TP/PP inference layouts when the
-visible GPU count matches the requested topology. The primary validated
-deployment remains dual RTX 2080 Ti with TP=2 and PP=1; other layouts are
-available for engineering tests and require separate validation.
+visible GPU count matches the requested topology. The primary supported layouts
+are dual RTX 2080 Ti with TP=2 and four Tesla T10 GPUs with TP=4. Other layouts
+are available for engineering tests and require separate validation.
 
 ## Tested Model Checkpoints
 

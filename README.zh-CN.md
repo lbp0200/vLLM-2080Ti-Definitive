@@ -3,10 +3,10 @@
 
 ![vLLM 2080 Ti Definitive Edition 题图](docs/assets/vllm-2080ti-cover.jpg)
 
-面向双 RTX 2080 Ti 22 GB / SM75 推理的硬件定向 vLLM 发行线。`vllm-2080ti-definitive-0.2.x` 是针对该硬件维护的 CUDA 13.0 / PyTorch 2.13 运行时分支，基于上游 vLLM 提交 [`b23433088b`](https://github.com/vllm-project/vllm/commit/b23433088bf29980d20dff1bd64c753dd8883506)（`v0.29.1rc0-33`）。需要 CUDA 12.8 与 PyTorch 2.11 的系统仍可使用 `0.1.x` 兼容线。
+面向双 RTX 2080 Ti 和多卡 Tesla T10 推理的 vLLM 专用运行时。
 
-项目保留复现双 2080 Ti TP=2 栈所需的 SM75 专用源码修改、launcher profile 和
-验证资料。它基于上游 vLLM；再发布派生版本时必须保留上游许可证、上游署名以及
+这个硬件定向 fork 保留了复现上述 Turing 推理栈所需的 SM75 专用源码修改、launcher
+profile 和验证资料。它基于上游 vLLM；再发布派生版本时必须保留上游许可证、上游署名以及
 `github.com/weicj` 的项目署名。
 
 语言：[English](README.md) | 简体中文
@@ -38,6 +38,10 @@
 本 fork 通过 Marlin、FlashInfer/FlashQLA、TurboQuant/INT8 KV、MTP 和 CUDA
 Graph，把这些硬件资源转成可用的 serving 栈。
 
+第二类主要目标硬件是四张通过 PCIe 连接的 16 GiB Tesla T10，面向 TP=4 的
+Qwen 27B 服务，包含 256K 上下文的文本和图文路线。这些 profile 使用 ABI 匹配的
+PCIe custom all-reduce 扩展，详见 [T10 Profile 导引](profiles/4xT10/README.md)。
+
 ## 支持状态
 
 `0.2.x` 的目标环境是 Ubuntu 26.04 及以上、Linux kernel 7 及以上、GCC/G++ 15、CUDA 13.0 与 PyTorch 2.13。持续维护的 `0.1.x` 线仍是 CUDA 12.8、PyTorch 2.11、较早 kernel 以及 GCC 12/13/14 的兼容路线。
@@ -47,8 +51,9 @@ Graph，把这些硬件资源转成可用的 serving 栈。
 正确性检查和基准测试方法。只有对应 profile 文档已完成验证的模型路线，才属于本分支的支持范围。
 
 Launcher 支持选择 tensor parallel（`TP_SIZE`）和 pipeline parallel（`PP_SIZE`），
-当可见 GPU 数量与拓扑要求匹配时可以启动 TP/PP 混合推理。当前主要验证部署仍是双
-RTX 2080 Ti、TP=2、PP=1；其他并行布局可用于工程测试，但需要单独完成验证。
+当可见 GPU 数量与拓扑要求匹配时可以启动 TP/PP 混合推理。当前主要支持布局是双
+RTX 2080 Ti、TP=2，以及四张 Tesla T10、TP=4。其他并行布局可用于工程测试，但需要
+单独完成验证。
 
 ## 已验证模型路线
 
