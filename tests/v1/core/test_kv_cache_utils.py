@@ -3007,7 +3007,10 @@ def _dflash_aligned_hybrid_grouping_config():
             use_eagle_block_drop=lambda: False,
             draft_model_config=SimpleNamespace(
                 architectures=["DFlash2DraftModel"],
-                hf_config=SimpleNamespace(num_hidden_layers=5),
+                hf_config=SimpleNamespace(
+                    num_hidden_layers=5,
+                    dflash_config={"target_layer_ids": [5, 19, 33, 47, 61]},
+                ),
             ),
         ),
         model_config=SimpleNamespace(
@@ -3041,6 +3044,21 @@ def test_dflash2_aligned_hybrid_uses_independent_block_pools():
     assert not kv_cache_utils._uses_native_dflash2(config)
 
     config.speculative_config.use_dflash = lambda: False
+    assert not kv_cache_utils._uses_native_dflash2(config)
+
+
+def test_dflash2_identity_falls_back_to_checkpoint_name():
+    config = _dflash_aligned_hybrid_grouping_config()
+    config.speculative_config.draft_model_config.architectures = [
+        "DFlashDraftModel"
+    ]
+    config.speculative_config.draft_model_config.model = (
+        "/models/Qwen3.8-27B-DFlash2"
+    )
+
+    assert kv_cache_utils._uses_native_dflash2(config)
+
+    config.speculative_config.draft_model_config.model = "/models/Qwen3-DFlash"
     assert not kv_cache_utils._uses_native_dflash2(config)
 
 
