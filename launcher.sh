@@ -331,6 +331,7 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   GPU_DEVICES
   TP_SIZE
   PP_SIZE
+  GENERATION_CONFIG
   CHAT_TEMPLATE_FILE
   CHAT_TEMPLATE_PRESET
   TEMPLATE_DIR
@@ -695,6 +696,7 @@ save_manager_state() {
     printf 'MODEL_VARIANT=%q\n' "${MODEL_VARIANT:-}"
     printf 'SERVED_NAME=%q\n' "${SERVED_NAME:-}"
     printf 'GPU_DEVICES=%q\n' "${GPU_DEVICES:-}"
+    printf 'GENERATION_CONFIG=%q\n' "${GENERATION_CONFIG:-auto}"
     printf 'QUANTIZATION=%q\n' "${QUANTIZATION:-}"
     printf 'KV_CACHE_DTYPE=%q\n' "${KV_CACHE_DTYPE:-}"
     printf 'MAMBA_CACHE_MODE=%q\n' "${MAMBA_CACHE_MODE:-}"
@@ -3423,7 +3425,7 @@ build_args() {
     --dtype half
     --tensor-parallel-size "${TP_SIZE:-2}"
     --pipeline-parallel-size "${PP_SIZE:-1}"
-    --generation-config vllm
+    --generation-config "${GENERATION_CONFIG:-auto}"
     --max-model-len "$MAX_MODEL_LEN"
     --enable-chunked-prefill
     --max-num-seqs "$MAX_NUM_SEQS"
@@ -4266,6 +4268,7 @@ Launch summary:
   GPU devices:          ${GPU_DEVICES:-$(detect_default_gpu_devices)}
   CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-auto}
   TP / PP:              ${TP_SIZE:-} / ${PP_SIZE:-1}
+  Generation config:    ${GENERATION_CONFIG:-auto}
   KV precision:         ${KV_CACHE_DTYPE:-fp16}
   TQ diagnostics:       $(current_tq_diagnostics_label)
   Prefix cache:         $(current_prefix_cache_label)
