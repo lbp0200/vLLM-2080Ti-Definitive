@@ -60,7 +60,7 @@ This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately fro
 - Adds profile-driven Qwen3.8 FP8 and NVFP4 routes, an improved interactive launcher, explicit TP/PP layout selection, physical GPU ordering, and stricter build/runtime preflight checks.
 - Ports the validated SM75 fixes for Qwen reasoning, named and streaming tool calls, CUDA Graph profiling, TurboQuant workspace reservation, and TurboQuant decode diagnostics to the newer runtime architecture.
 - Restores the FlashInfer and FlashQLA legacy paths required by the validated SM75 runtime without importing TileLang during normal model initialization.
-- Adds bilingual profile documentation, a validation report, and a [PR migration audit](docs/0.2.x-pr-migration-audit.md) that separates migrated, absorbed, experimental, and unsupported work.
+- Adds bilingual profile documentation and a validation report for the SM75 migration.
 
 ### Validation
 

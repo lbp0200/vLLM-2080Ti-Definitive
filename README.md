@@ -53,8 +53,6 @@ treat a checkpoint that merely loads as a promoted deployment route.
 Pre4 is a nightly integration candidate. Rerun the documented SM75 target
 routes before using it as a promoted deployment build.
 
-The disposition of the previously merged SM75 PRs is recorded in [the 0.2.x PR migration audit](docs/0.2.x-pr-migration-audit.md).
-
 The launcher supports selecting tensor parallelism (`TP_SIZE`) and pipeline
 parallelism (`PP_SIZE`), including mixed TP/PP inference layouts when the
 visible GPU count matches the requested topology. The primary validated

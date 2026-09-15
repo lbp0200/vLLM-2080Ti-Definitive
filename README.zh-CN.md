@@ -49,8 +49,6 @@ checkpoint 不应被视为已提升为部署路线。
 
 pre4 是 nightly 集成候选，必须重新运行文档中的 SM75 目标路线后才可晋升为部署构建。
 
-此前已合并 SM75 PR 的迁移判断见 [0.2.x PR 迁移审计](docs/0.2.x-pr-migration-audit.md)。
-
 Launcher 支持选择 tensor parallel（`TP_SIZE`）和 pipeline parallel（`PP_SIZE`），
 当可见 GPU 数量与拓扑要求匹配时可以启动 TP/PP 混合推理。当前主要验证部署仍是双
 RTX 2080 Ti、TP=2、PP=1；其他并行布局可用于工程测试，但需要单独完成验证。
