@@ -5086,12 +5086,33 @@ run_startup_performance_test() {
   return 0
 }
 
+run_startup_performance_warmup() {
+  local url_host=$1
+  local helper result
+  helper=$(startup_performance_helper_path) || return 0
+  if ! result=$("$RUNTIME_ROOT/.venv/bin/python" "$helper" \
+      --model-dir "$MODEL_DIR" --served-name "$SERVED_NAME" \
+      --base-url "http://${url_host}:${PORT}/v1" --endpoint completions \
+      --prompt-tokens 4096 --gen-tokens 128 \
+      --label "launcher-startup-warmup" --prompt-variant "launcher-${STAMP}-warmup" \
+      --out /dev/null --ignore-eos --pure-filler --allowed-token-text " the" 2>&1); then
+    echo "Startup benchmark warm-up failed; continuing without counting it in performance statistics." >&2
+    return 0
+  fi
+  if ! startup_performance_sample_values "$result" >/dev/null 2>&1; then
+    echo "Startup benchmark warm-up did not complete the fixed 4K/128 contract; continuing." >&2
+    return 0
+  fi
+  echo "Startup benchmark warm-up: completed (4K/128, excluded from statistics)."
+}
+
 maybe_run_startup_performance_test() {
   local url_host=$1
   local pid_file=$2
   local reason answer
 
   clear_startup_performance_state
+  run_startup_performance_warmup "$url_host"
   while true; do
     answer=$(read_line_with_esc "Run uncached 3x 4K/128 reference performance test now? [y/N]: ") || {
       LAST_PERF_STATUS=not_requested
