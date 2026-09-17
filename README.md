@@ -70,12 +70,12 @@ Current tested model and weight routes:
 
 ## ⚡ Highlights
 
-| Hardware | Weight | Context / KV | 4K/128 prefill / decode | 32K/512 prefill / decode |
-| --- | --- | --- | ---: | ---: |
-| 2x RTX 2080 Ti | Qwen3.8 27B NVFP4 | 256K / FP16 | **1465.02 / 220.69 tok/s** | **1280.57 / 213.66 tok/s** |
-| 4x Tesla T10 | Qwen3.8 27B FP8 | 256K / FP16 | **1444.73 / 190.78 tok/s** | **1456.77 / 188.94 tok/s** |
+| Hardware | Weight | Context / KV | Mode / Messages | 4K/128 prefill / decode | 32K/512 prefill / decode |
+| --- | --- | --- | --- | ---: | ---: |
+| 2x RTX 2080 Ti | Qwen3.8 27B NVFP4 | 256K / FP8 | fast / text+image | **1440.77 / 222.12 tok/s** | **1285.16 / 209.80 tok/s** |
+| 4x Tesla T10 | Qwen3.8 27B FP8 | 256K / FP16 | fast / text-only | **1444.73 / 190.78 tok/s** | **1456.77 / 188.94 tok/s** |
 
-Both are single-request results using DFlash2 (default K=7) with high-speculative-acceptance synthetic inputs. Real-task throughput depends on the draft acceptance rate and may not reach the figures above.
+Both are single-request results using DFlash2 (default K=7) with high-speculative-acceptance, text-only synthetic inputs. The 2080 Ti profile also accepts image messages; image functionality was validated separately from the throughput lane. Real-task throughput depends on the draft acceptance rate and may not reach the figures above.
 
 ## 🚀 Build And Launch
 
