@@ -429,6 +429,38 @@ effective_speculative_tokens() {
   printf '0\n'
 }
 
+speculative_cudagraph_capture_sizes() {
+  local speculative_tokens=${1:-$(effective_speculative_tokens)}
+  local max_num_seqs=${2:-${MAX_NUM_SEQS:-1}}
+  local query_width sequence_count sizes=""
+
+  [[ "$speculative_tokens" =~ ^[0-9]+$ ]] || return 1
+  [[ "$max_num_seqs" =~ ^[1-9][0-9]*$ ]] || return 1
+
+  query_width=$((speculative_tokens + 1))
+  for ((sequence_count = 1; sequence_count <= max_num_seqs; sequence_count++)); do
+    [[ -z "$sizes" ]] || sizes+=","
+    sizes+=$((query_width * sequence_count))
+  done
+  printf '%s\n' "$sizes"
+}
+
+current_cudagraph_capture_label() {
+  local speculative_tokens
+
+  if [[ -n "${COMPILATION_CONFIG_JSON:-}" ]]; then
+    printf 'custom\n'
+    return 0
+  fi
+
+  speculative_tokens=$(effective_speculative_tokens)
+  if [[ -n "${SPECULATIVE_CONFIG:-}" || "$speculative_tokens" -gt 0 ]]; then
+    speculative_cudagraph_capture_sizes "$speculative_tokens" "${MAX_NUM_SEQS:-1}"
+  else
+    printf '1\n'
+  fi
+}
+
 default_speculative_attention_backend() {
   local method
   method=$(effective_speculative_method)
@@ -744,8 +776,9 @@ ROUTE_PROFILE_KEYS=(
   KV_CACHE_DTYPE
   MAX_MODEL_LEN
   GPU_UTIL
-MAX_BATCHED_TOKENS
-MAX_NUM_SEQS
+  MAX_BATCHED_TOKENS
+  MAX_NUM_SEQS
+  LONG_PREFILL_TOKEN_THRESHOLD
   NO_ASYNC_SCHEDULING
   MTP_K
   SPECULATIVE_METHOD
@@ -1178,8 +1211,9 @@ save_manager_state() {
     printf 'ENABLE_PROMPT_TOKENS_DETAILS=%q\n' "${ENABLE_PROMPT_TOKENS_DETAILS:-1}"
     printf 'MAX_MODEL_LEN=%q\n' "${MAX_MODEL_LEN:-}"
     printf 'GPU_UTIL=%q\n' "${GPU_UTIL:-}"
-	    printf 'MAX_BATCHED_TOKENS=%q\n' "${MAX_BATCHED_TOKENS:-}"
-	    printf 'MAX_NUM_SEQS=%q\n' "${MAX_NUM_SEQS:-}"
+    printf 'MAX_BATCHED_TOKENS=%q\n' "${MAX_BATCHED_TOKENS:-}"
+    printf 'MAX_NUM_SEQS=%q\n' "${MAX_NUM_SEQS:-}"
+    printf 'LONG_PREFILL_TOKEN_THRESHOLD=%q\n' "${LONG_PREFILL_TOKEN_THRESHOLD:-}"
 	    printf 'MTP_K=%q\n' "${MTP_K:-}"
 	    printf 'SPECULATIVE_METHOD=%q\n' "${SPECULATIVE_METHOD:-}"
 	    printf 'SPECULATIVE_MODEL=%q\n' "${SPECULATIVE_MODEL:-}"
@@ -2825,6 +2859,7 @@ save_current_profile_menu() {
   write_profile_entry "$target_file.tmp" GPU_UTIL "${GPU_UTIL:-}"
   write_profile_entry "$target_file.tmp" MAX_BATCHED_TOKENS "${MAX_BATCHED_TOKENS:-}"
   write_profile_entry "$target_file.tmp" MAX_NUM_SEQS "${MAX_NUM_SEQS:-}"
+  write_profile_entry "$target_file.tmp" LONG_PREFILL_TOKEN_THRESHOLD "${LONG_PREFILL_TOKEN_THRESHOLD:-}"
   write_profile_entry "$target_file.tmp" NO_ASYNC_SCHEDULING "${NO_ASYNC_SCHEDULING:-}"
   write_profile_entry "$target_file.tmp" MTP_K "${MTP_K:-}"
   write_profile_entry "$target_file.tmp" SPECULATIVE_METHOD "${SPECULATIVE_METHOD:-}"
@@ -4476,6 +4511,13 @@ build_args() {
     --max-num-batched-tokens "$MAX_BATCHED_TOKENS"
   )
 
+  if [[ -n "${LONG_PREFILL_TOKEN_THRESHOLD:-}" ]]; then
+    VLLM_ARGS+=(--long-prefill-token-threshold "$LONG_PREFILL_TOKEN_THRESHOLD")
+  fi
+  if [[ "${PREFILL_BATCH_BARRIER:-0}" == "1" ]]; then
+    VLLM_ARGS+=(--prefill-batch-barrier)
+  fi
+
   [[ -n "${PP_SIZE:-}" ]] && VLLM_ARGS+=(--pipeline-parallel-size "$PP_SIZE")
 
   [[ -n "${QUANTIZATION:-}" ]] && VLLM_ARGS+=(--quantization "$QUANTIZATION")
@@ -4530,10 +4572,9 @@ build_args() {
   fi
   [[ -n "${CHAT_TEMPLATE_FILE:-}" ]] && VLLM_ARGS+=(--chat-template "$CHAT_TEMPLATE_FILE")
 
-  local spec_method spec_tokens capture generated_speculative_config
+  local spec_method spec_tokens capture_sizes capture_max generated_speculative_config
   spec_method=$(effective_speculative_method)
   spec_tokens=$(effective_speculative_tokens)
-  capture=$((spec_tokens + 1))
   if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
     VLLM_ARGS+=(--speculative-config "$SPECULATIVE_CONFIG")
   elif [[ -n "$spec_method" && "$spec_tokens" =~ ^[0-9]+$ ]] && (( spec_tokens > 0 )); then
@@ -4565,7 +4606,10 @@ build_args() {
   if [[ -n "${COMPILATION_CONFIG_JSON:-}" ]]; then
     VLLM_ARGS+=(--compilation-config "$COMPILATION_CONFIG_JSON")
   elif [[ -n "${SPECULATIVE_CONFIG:-}" || "$spec_tokens" -gt 0 ]]; then
-    VLLM_ARGS+=(--compilation-config "{\"cudagraph_mode\":\"${cudagraph_mode}\",\"cudagraph_capture_sizes\":[${capture}],\"max_cudagraph_capture_size\":${capture}}")
+    capture_sizes=$(speculative_cudagraph_capture_sizes "$spec_tokens" "$MAX_NUM_SEQS") || \
+      die "Unable to derive speculative CUDA graph capture sizes."
+    capture_max=$((MAX_NUM_SEQS * (spec_tokens + 1)))
+    VLLM_ARGS+=(--compilation-config "{\"cudagraph_mode\":\"${cudagraph_mode}\",\"cudagraph_capture_sizes\":[${capture_sizes}],\"max_cudagraph_capture_size\":${capture_max}}")
   else
     VLLM_ARGS+=(--compilation-config "{\"cudagraph_mode\":\"${cudagraph_mode}\",\"cudagraph_capture_sizes\":[1],\"max_cudagraph_capture_size\":1}")
   fi
@@ -5475,6 +5519,14 @@ check_checkpoint_mmap_policy() {
   return 1
 }
 
+configure_automatic_prefill_batch_barrier() {
+  if [[ "${MAX_NUM_SEQS:-1}" =~ ^[1-9][0-9]*$ ]] && (( 10#$MAX_NUM_SEQS > 1 )); then
+    PREFILL_BATCH_BARRIER=1
+  else
+    PREFILL_BATCH_BARRIER=0
+  fi
+}
+
 prepare_runtime_defaults() {
   if [[ -z "${MODEL_DIR:-}" ]]; then
     echo "ERROR: MODEL_DIR is required. Choose item 1 first." >&2
@@ -5500,6 +5552,7 @@ prepare_runtime_defaults() {
   GPU_UTIL=${GPU_UTIL:-$(default_gpu_util)}
   MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-2048}
   MAX_NUM_SEQS=${MAX_NUM_SEQS:-1}
+  configure_automatic_prefill_batch_barrier
   MTP_K=${MTP_K:-0}
   SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH=${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}
   SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION=${SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION:-0}
@@ -5584,6 +5637,9 @@ Launch summary:
   GPU util:             $GPU_UTIL
   Max batched tokens:   $MAX_BATCHED_TOKENS
   Max sequences:        $MAX_NUM_SEQS
+  Prefill threshold:    ${LONG_PREFILL_TOKEN_THRESHOLD:-auto}
+  Prefill batch barrier: ${PREFILL_BATCH_BARRIER:-0} (automatic for max sequences > 1)
+  CUDA graph captures:  $(current_cudagraph_capture_label)
   Spec decode:          $(current_speculative_label)
   DFlash draft fetch:   $(current_dflash_download_route_label)
   Message type:         $message_type
@@ -6005,4 +6061,6 @@ main() {
   fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
