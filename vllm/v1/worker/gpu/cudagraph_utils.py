@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 import gc
 import itertools
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import groupby, product
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
@@ -27,7 +28,12 @@ from vllm.distributed.parallel_state import (
     graph_capture,
     is_global_first_rank,
 )
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.forward_context import (
+    BatchDescriptor,
+    get_forward_context,
+    is_forward_context_available,
+    set_forward_context,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
@@ -49,6 +55,115 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 logger = init_logger(__name__)
+
+
+_FULLGRAPH_TOPOLOGY_FIELDS = (
+    "num_prefills",
+    "num_prefill_tokens",
+    "num_decodes",
+    "num_decode_tokens",
+    "num_spec_decodes",
+    "num_spec_decode_tokens",
+    "num_actual_tokens",
+)
+
+
+def _copy_fullgraph_metadata(
+    runtime: Any,
+    captured: Any,
+    *,
+    path: str = "attn_metadata",
+    visited: set[tuple[int, int]] | None = None,
+) -> None:
+    """Copy live tensors into capture-owned FULL graph metadata storage."""
+    if visited is None:
+        visited = set()
+    pair = (id(runtime), id(captured))
+    if pair in visited:
+        return
+    visited.add(pair)
+
+    if isinstance(runtime, torch.Tensor) or isinstance(captured, torch.Tensor):
+        if not isinstance(runtime, torch.Tensor) or not isinstance(
+            captured, torch.Tensor
+        ):
+            raise RuntimeError(
+                f"FULL CUDA graph metadata changed tensor presence at {path}"
+            )
+        if (
+            runtime.shape != captured.shape
+            or runtime.dtype != captured.dtype
+            or runtime.device != captured.device
+        ):
+            raise RuntimeError(
+                "FULL CUDA graph metadata tensor mismatch at "
+                f"{path}: runtime=(shape={tuple(runtime.shape)}, "
+                f"dtype={runtime.dtype}, device={runtime.device}), "
+                f"captured=(shape={tuple(captured.shape)}, "
+                f"dtype={captured.dtype}, device={captured.device})"
+            )
+        captured.copy_(runtime, non_blocking=True)
+        return
+
+    for field in _FULLGRAPH_TOPOLOGY_FIELDS:
+        if hasattr(captured, field):
+            runtime_value = getattr(runtime, field, None)
+            captured_value = getattr(captured, field)
+            if runtime_value != captured_value:
+                raise RuntimeError(
+                    "FULL CUDA graph metadata topology mismatch at "
+                    f"{path}.{field}: runtime={runtime_value}, "
+                    f"captured={captured_value}"
+                )
+
+    if dataclasses.is_dataclass(captured) and not isinstance(captured, type):
+        if not dataclasses.is_dataclass(runtime) or isinstance(runtime, type):
+            raise RuntimeError(
+                f"FULL CUDA graph metadata changed container type at {path}"
+            )
+        for field in dataclasses.fields(captured):
+            _copy_fullgraph_metadata(
+                getattr(runtime, field.name),
+                getattr(captured, field.name),
+                path=f"{path}.{field.name}",
+                visited=visited,
+            )
+        return
+
+    if isinstance(captured, Mapping):
+        if not isinstance(runtime, Mapping) or runtime.keys() != captured.keys():
+            raise RuntimeError(
+                f"FULL CUDA graph metadata mapping keys changed at {path}"
+            )
+        for key, captured_value in captured.items():
+            _copy_fullgraph_metadata(
+                runtime[key],
+                captured_value,
+                path=f"{path}[{key!r}]",
+                visited=visited,
+            )
+        return
+
+    if isinstance(captured, Sequence) and not isinstance(
+        captured, (str, bytes, bytearray)
+    ):
+        if (
+            not isinstance(runtime, Sequence)
+            or isinstance(runtime, (str, bytes, bytearray))
+            or len(runtime) != len(captured)
+        ):
+            raise RuntimeError(
+                f"FULL CUDA graph metadata sequence shape changed at {path}"
+            )
+        for index, (runtime_value, captured_value) in enumerate(
+            zip(runtime, captured)
+        ):
+            _copy_fullgraph_metadata(
+                runtime_value,
+                captured_value,
+                path=f"{path}[{index}]",
+                visited=visited,
+            )
 
 
 class AttentionState(NamedTuple):
@@ -167,6 +282,12 @@ class CudaGraphManager:
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
 
         self._graphs_captured = False
+
+        # V2 FULL graphs retain the metadata objects used during capture. Runtime
+        # builders create new objects, whose tensor contents must be staged into
+        # the capture-owned storage before replay.
+        self._fullgraph_attn_metadata: dict[BatchExecutionDescriptor, Any] = {}
+        self._fullgraph_slot_mappings: dict[BatchExecutionDescriptor, Any] = {}
 
         # Profiling hooks, set only by profile_cudagraph_memory() below: cap
         # FULL-mode capture at the N largest descriptors and record each
@@ -470,7 +591,13 @@ class CudaGraphManager:
             num_ubatches=num_ubatches,
         )
 
-    def run_fullgraph(self, desc: BatchExecutionDescriptor):
+    def run_fullgraph(
+        self,
+        desc: BatchExecutionDescriptor,
+        *,
+        attn_metadata: Any | None = None,
+        slot_mapping: Any | None = None,
+    ):
         """Replay a captured FULL cudagraph."""
         assert desc.cg_mode == CUDAGraphMode.FULL, (
             f"Expected FULL mode, got {desc.cg_mode}"
@@ -483,7 +610,48 @@ class CudaGraphManager:
         # cannot see. Without this, replay could overwrite static buffers
         # while those copies are still in flight.
         get_offloader().sync_prev_onload()
+        self._refresh_fullgraph_attn_metadata(
+            desc,
+            runtime_attn_metadata=attn_metadata,
+            runtime_slot_mapping=slot_mapping,
+        )
         self.graphs[desc].replay()
+
+    def _refresh_fullgraph_attn_metadata(
+        self,
+        desc: BatchExecutionDescriptor,
+        *,
+        runtime_attn_metadata: Any | None = None,
+        runtime_slot_mapping: Any | None = None,
+    ) -> None:
+        captured = self._fullgraph_attn_metadata.get(desc)
+        if captured is None:
+            return
+        if runtime_attn_metadata is None:
+            if not is_forward_context_available():
+                raise RuntimeError(
+                    "FULL CUDA graph replay requires runtime attention metadata"
+                )
+            runtime_attn_metadata = get_forward_context().attn_metadata
+        if runtime_attn_metadata is None:
+            raise RuntimeError(
+                "FULL CUDA graph replay requires runtime attention metadata"
+            )
+        _copy_fullgraph_metadata(runtime_attn_metadata, captured)
+
+        captured_slot_mapping = self._fullgraph_slot_mappings.get(desc)
+        if captured_slot_mapping is not None and runtime_slot_mapping is None:
+            runtime_slot_mapping = (
+                get_forward_context().slot_mapping
+                if is_forward_context_available()
+                else None
+            )
+        if captured_slot_mapping is not None and runtime_slot_mapping is not None:
+            _copy_fullgraph_metadata(
+                runtime_slot_mapping,
+                captured_slot_mapping,
+                path="slot_mapping",
+            )
 
     def init_breakable_cg_runner(self, model: nn.Module) -> None:
         if self.breakable_cg_runner is None:
@@ -595,6 +763,9 @@ class ModelCudaGraphManager(CudaGraphManager):
                 max_query_len=desc.max_query_len,
                 pcp_manager=pcp_manager,
             )
+            if desc.cg_mode == CUDAGraphMode.FULL:
+                self._fullgraph_attn_metadata[desc] = attn_metadata
+                self._fullgraph_slot_mappings[desc] = slot_mappings
 
             # Capture with dummy rows marked as padding.
             input_buffers.is_padding.fill_(True)
@@ -661,10 +832,18 @@ class ModelCudaGraphManager(CudaGraphManager):
         super().capture(create_forward_fn, progress_bar_desc)
 
     def run_fullgraph(
-        self, desc: BatchExecutionDescriptor
+        self,
+        desc: BatchExecutionDescriptor,
+        *,
+        attn_metadata: Any | None = None,
+        slot_mapping: Any | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
         """Replay a captured FULL cudagraph and return hidden states."""
-        super().run_fullgraph(desc)
+        super().run_fullgraph(
+            desc,
+            attn_metadata=attn_metadata,
+            slot_mapping=slot_mapping,
+        )
         if not self.is_last_pp_rank:
             assert self.intermediate_tensors is not None
             return self.intermediate_tensors[: desc.num_tokens]
