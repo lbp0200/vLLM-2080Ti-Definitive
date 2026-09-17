@@ -114,7 +114,6 @@ def _sm75_spec_prefill_graph_query_len(
         not current_platform.is_device_capability(75)
         or vllm_config.model_config.dtype != torch.float16
         or vllm_config.parallel_config.decode_context_parallel_size != 1
-        or vllm_config.scheduler_config.max_num_seqs != 1
         or vllm_config.attention_config.use_non_causal
         or envs.VLLM_BATCH_INVARIANT
         or speculative_config is None
@@ -124,12 +123,17 @@ def _sm75_spec_prefill_graph_query_len(
         return None
 
     query_len = speculative_config.num_speculative_tokens + 1
+    max_num_seqs = vllm_config.scheduler_config.max_num_seqs
     capture_sizes = {
         size for size in (compilation_config.cudagraph_capture_sizes or ()) if size > 0
     }
+    expected_capture_sizes = {
+        query_len * batch_size for batch_size in range(1, max_num_seqs + 1)
+    }
     if (
-        capture_sizes != {query_len}
-        or compilation_config.max_cudagraph_capture_size != query_len
+        capture_sizes != expected_capture_sizes
+        or compilation_config.max_cudagraph_capture_size
+        != query_len * max_num_seqs
     ):
         return None
 
@@ -1746,15 +1750,21 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     and self.prefill_fixed_split_size in (-1, None)
                     and not self.disable_split_kv
                     and num_decodes == 0
-                    and num_prefills == 1
-                    and num_reqs == 1
-                    and num_prefill_tokens == self._sm75_spec_query_len
-                    and num_actual_tokens == self._sm75_spec_query_len
+                    and num_prefills == num_reqs
+                    and 1 <= num_reqs <= self.max_num_reqs
+                    and num_prefill_tokens
+                    == self._sm75_spec_query_len * num_reqs
+                    and num_actual_tokens
+                    == self._sm75_spec_query_len * num_reqs
                     and common_attn_metadata.max_query_len
                     == self._sm75_spec_query_len
-                    and common_attn_metadata.query_start_loc_cpu.shape == (2,)
+                    and common_attn_metadata.query_start_loc_cpu.shape
+                    == (num_reqs + 1,)
                     and common_attn_metadata.query_start_loc_cpu.tolist()
-                    == [0, self._sm75_spec_query_len]
+                    == [
+                        self._sm75_spec_query_len * index
+                        for index in range(num_reqs + 1)
+                    ]
                 )
                 if use_sm75_spec_graph_wrapper:
                     prefill_wrapper = self._get_sm75_spec_prefill_wrapper(
