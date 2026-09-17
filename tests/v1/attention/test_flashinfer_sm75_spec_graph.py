@@ -11,9 +11,9 @@ from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 
-def _config(*, capture_sizes=(8,), max_num_seqs=1, dcp=1):
+def _config(*, capture_sizes=(8,), max_num_seqs=1, dcp=1, spec_tokens=7):
     return SimpleNamespace(
-        speculative_config=SimpleNamespace(num_speculative_tokens=7),
+        speculative_config=SimpleNamespace(num_speculative_tokens=spec_tokens),
         compilation_config=SimpleNamespace(
             cudagraph_mode=SimpleNamespace(
                 decode_mode=lambda: CUDAGraphMode.FULL,
@@ -48,9 +48,13 @@ def test_sm75_spec_prefill_graph_support_is_narrow(monkeypatch):
     assert flashinfer._sm75_spec_prefill_graph_query_len(
         _config(), _attention_spec()
     ) == 8
+    assert flashinfer._sm75_spec_prefill_graph_query_len(
+        _config(capture_sizes=(4, 8), max_num_seqs=2, spec_tokens=3),
+        _attention_spec(),
+    ) == 4
     assert (
         flashinfer._sm75_spec_prefill_graph_query_len(
-            _config(max_num_seqs=2), _attention_spec()
+            _config(capture_sizes=(8,), max_num_seqs=2), _attention_spec()
         )
         is None
     )
@@ -123,3 +127,12 @@ def test_sm75_spec_prefill_wrapper_reuses_graph_buffers(monkeypatch):
     causal_wrapper = builder._get_sm75_spec_prefill_wrapper(1, 8, False)
     assert causal_wrapper is not third
     assert len(created) == 3
+
+    concurrent_wrapper = builder._get_sm75_spec_prefill_wrapper(2, 4, True)
+    assert concurrent_wrapper is not third
+    assert len(created) == 4
+    concurrent_kwargs = created[-1][1]
+    assert concurrent_kwargs["qo_indptr_buf"].shape == (3,)
+    assert concurrent_kwargs["paged_kv_indptr_buf"].shape == (3,)
+    assert concurrent_kwargs["paged_kv_indices_buf"].shape == (32768,)
+    assert concurrent_kwargs["paged_kv_last_page_len_buf"].shape == (2,)
