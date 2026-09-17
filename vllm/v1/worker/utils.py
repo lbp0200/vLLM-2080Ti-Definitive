@@ -717,7 +717,7 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
 
 def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor],
-    num_blocks: int,
+    num_blocks: int | Sequence[int],
     kv_cache_block_copies: Sequence[KVCacheBlockCopy],
 ) -> None:
     if not kv_cache_block_copies:
@@ -727,7 +727,7 @@ def copy_kv_cache_blocks_inplace(
     indices: torch.Tensor | None = None
     seen: set[tuple[torch.device, int]] = set()
     copied_storages: set[tuple[torch.device, int]] = set()
-    for cache in kv_caches:
+    for cache_idx, cache in enumerate(kv_caches):
         # Layers sharing KV (cross-layer sharing) alias the same view; copy it
         # once. data_ptr distinguishes per-layer views of a shared allocation.
         key = (cache.device, cache.data_ptr())
@@ -740,27 +740,38 @@ def copy_kv_cache_blocks_inplace(
         assert cache.device == indices.device
         src, dst = indices.unbind(dim=1)
 
-        kernel_blocks_per_block, remainder = divmod(cache.shape[0], num_blocks)
+        cache_num_blocks = (
+            num_blocks[cache_idx] if not isinstance(num_blocks, int) else num_blocks
+        )
+        if cache_num_blocks <= 0:
+            raise ValueError(
+                f"KV cache block capacity must be positive, got {cache_num_blocks}"
+            )
+        kernel_blocks_per_block, remainder = divmod(
+            cache.shape[0], cache_num_blocks
+        )
         assert remainder == 0, (
             f"{cache.shape[0]} kernel blocks not divisible by "
-            f"{num_blocks} scheduler blocks"
+            f"{cache_num_blocks} scheduler blocks"
         )
         storage = cache.untyped_storage()
         storage_key = (cache.device, storage.data_ptr())
         scheduler_block_stride = (
             cache.stride(0) * cache.element_size() * kernel_blocks_per_block
         )
-        if storage.nbytes() == num_blocks * scheduler_block_stride:
+        if storage.nbytes() == cache_num_blocks * scheduler_block_stride:
             if storage_key in copied_storages:
                 continue
             copied_storages.add(storage_key)
             blocks = torch.empty(0, dtype=torch.uint8, device=cache.device)
             blocks.set_(storage)
-            blocks = blocks.view(num_blocks, -1)
+            blocks = blocks.view(cache_num_blocks, -1)
         else:
             # Fold virtual block splitting into the shape so that dim 0 counts
             # scheduler blocks; unflatten of dim 0 is always a view.
-            blocks = cache.unflatten(0, (num_blocks, kernel_blocks_per_block))
+            blocks = cache.unflatten(
+                0, (cache_num_blocks, kernel_blocks_per_block)
+            )
         blocks[dst] = blocks[src]
 
 
