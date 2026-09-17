@@ -1899,10 +1899,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
-            self.kv_connector.pre_forward(
-                **connector_kwargs, attn_metadata=attn_metadata
+            batch_descriptor = BatchDescriptor(
+                num_tokens=input_batch.num_tokens_after_padding,
+                has_lora=self.lora_config is not None,
+                num_active_loras=batch_desc.num_active_loras,
             )
-            model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
+            with set_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=input_batch.num_tokens_after_padding,
+                cudagraph_runtime_mode=batch_desc.cg_mode,
+                num_tokens_across_dp=(
+                    dp_sync.num_tokens_across_dp if dp_sync is not None else None
+                ),
+                batch_descriptor=batch_descriptor,
+                ubatch_slices=ubatch_slices,
+                slot_mapping=slot_mappings_by_layer,
+                skip_compiled=skip_compiled,
+                is_padding=input_batch.is_padding,
+            ):
+                self.kv_connector.pre_forward(
+                    **connector_kwargs, attn_metadata=attn_metadata
+                )
+                model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(

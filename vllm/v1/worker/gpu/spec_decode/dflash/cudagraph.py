@@ -108,6 +108,9 @@ class DFlashCudaGraphManager(CudaGraphManager):
                 causal=causal,
             )
             attn_metadata, slot_mappings = attn_state
+            if desc.cg_mode == CUDAGraphMode.FULL:
+                self._fullgraph_attn_metadata[desc] = attn_metadata
+                self._fullgraph_slot_mappings[desc] = slot_mappings
 
             return lambda cg_mode: forward_fn(
                 num_reqs,
