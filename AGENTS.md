@@ -41,8 +41,8 @@ benchmark guesses.
 - Keep profile files focused on route parameters only. Do not store global
   service settings such as GPU selection, port, chat template, or reasoning
   defaults inside route profiles.
-- Use `profiles/README.md`, `profiles/README.zh-CN.md`, and
-  `docs/model-profile-routes.md` as the source of truth for shipped profiles.
+- Use the hardware-specific README files under `profiles/` as the source of
+  truth for shipped profiles.
 - If adding or promoting a profile, include capacity evidence and throughput
   evidence using the repository's documented benchmark口径.
 - Do not keep tiny smoke-only profiles as recommended deployment presets.

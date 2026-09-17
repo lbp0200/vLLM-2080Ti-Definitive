@@ -12,8 +12,6 @@ ABI 匹配 PCIe custom all-reduce 扩展。
 | `qwen27b/w8a16/normal/mtp-fp16kv-1x256k-text-image.env` | normal | FP16 | MTP3 | text+image |
 | `qwen27b/w8a16/normal/nomtp-fp16kv-1x256k-text-image.env` | normal | FP16 | no MTP | text+image |
 
-性能和质量证据见[历史验证记录](../../docs/2080ti-0.2.1-pre-validation.md)。
-
 ## 完整测量数据
 
 | Profile | 模式 | 上下文 | KV | MTP | 消息 | GPU KV tokens | 性能 |

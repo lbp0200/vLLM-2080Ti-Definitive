@@ -14,9 +14,6 @@ concurrency, 256K context, and multimodal:
 | `qwen27b/w8a16/normal/mtp-fp16kv-1x256k-text-image.env` | normal | FP16 | MTP3 | text+image |
 | `qwen27b/w8a16/normal/nomtp-fp16kv-1x256k-text-image.env` | normal | FP16 | no MTP | text+image |
 
-See the [historical validation record](../../docs/2080ti-0.2.1-pre-validation.md)
-for performance and quality evidence.
-
 ## Measured Performance
 
 | Profile | Mode | Context | KV | MTP | Messages | GPU KV tokens | Performance |
