@@ -103,6 +103,55 @@ trtllm_workspace_buffer = None
 _flashinfer_workspace_buffers: dict[tuple[str, int | None], torch.Tensor] = {}
 
 
+def _sm75_spec_prefill_graph_query_len(
+    vllm_config: VllmConfig,
+    kv_cache_spec: KVCacheSpec,
+) -> int | None:
+    """Return the one SM75 speculative query width safe for FULL capture."""
+    speculative_config = vllm_config.speculative_config
+    compilation_config = vllm_config.compilation_config
+    if (
+        not current_platform.is_device_capability(75)
+        or vllm_config.model_config.dtype != torch.float16
+        or vllm_config.parallel_config.decode_context_parallel_size != 1
+        or vllm_config.scheduler_config.max_num_seqs != 1
+        or vllm_config.attention_config.use_non_causal
+        or envs.VLLM_BATCH_INVARIANT
+        or speculative_config is None
+        or not 1 <= speculative_config.num_speculative_tokens <= 7
+        or compilation_config.cudagraph_mode.decode_mode() != CUDAGraphMode.FULL
+    ):
+        return None
+
+    query_len = speculative_config.num_speculative_tokens + 1
+    capture_sizes = {
+        size for size in (compilation_config.cudagraph_capture_sizes or ()) if size > 0
+    }
+    if (
+        capture_sizes != {query_len}
+        or compilation_config.max_cudagraph_capture_size != query_len
+    ):
+        return None
+
+    found_attention = False
+    for spec in iter_layer_specs(kv_cache_spec):
+        if not isinstance(spec, AttentionSpec):
+            continue
+        found_attention = True
+        storage_supported = spec.dtype in (torch.float16, torch.float8_e4m3fn) or (
+            spec.dtype == torch.uint8
+            and spec.kv_quant_mode != KVQuantMode.NONE
+            and not spec.kv_quant_mode.is_nvfp4
+        )
+        if (
+            spec.head_size not in (128, 256)
+            or spec.kv_quant_mode.is_nvfp4
+            or not storage_supported
+        ):
+            return None
+    return query_len if found_attention else None
+
+
 def _flashinfer_workspace_buffer_size(
     max_num_batched_tokens: int,
     num_qo_heads: int,
@@ -782,6 +831,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_reqs = max_num_reqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
+        self._sm75_spec_query_len = _sm75_spec_prefill_graph_query_len(
+            vllm_config, kv_cache_spec
+        )
+        self._sm75_spec_prefill_wrappers: dict[
+            tuple[int, int, bool], BatchPrefillWithPagedKVCacheWrapper
+        ] = {}
         # Persistent uniform masks keep stable addresses for CUDA graphs.
         self._decode_mask_cache: dict[tuple[int, bool], torch.Tensor] = {}
         speculative_config = vllm_config.speculative_config
@@ -1039,6 +1094,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         kv_cache_spec: KVCacheSpec,
     ) -> AttentionCGSupport:
         """Get the cudagraph support level for FlashInfer attention."""
+        if _sm75_spec_prefill_graph_query_len(vllm_config, kv_cache_spec) is not None:
+            logger.info_once(
+                "SM75 speculative FA2 prefill uses stable metadata buffers for "
+                "FULL CUDA Graph replay."
+            )
+            return AttentionCGSupport.UNIFORM_BATCH
+
         # XQA lacks LSE for DCP; DCP also cannot graph variable-length trtllm-gen.
         if vllm_config.parallel_config.decode_context_parallel_size > 1:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
@@ -1083,6 +1145,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         return self._workspace_buffer
 
     def set_workspace_buffer(self, workspace_buffer: torch.Tensor):
+        if workspace_buffer is not self._workspace_buffer:
+            self._sm75_spec_prefill_wrappers.clear()
         self._workspace_buffer = workspace_buffer
 
     @staticmethod
@@ -1241,6 +1305,47 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     )
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
+
+    def _get_sm75_spec_prefill_wrapper(
+        self,
+        batch_size: int,
+        query_len: int,
+        causal: bool,
+    ) -> BatchPrefillWithPagedKVCacheWrapper:
+        """Get a graph-aware FA2 wrapper whose planning buffers never move."""
+        key = (batch_size, query_len, causal)
+        wrapper = self._sm75_spec_prefill_wrappers.get(key)
+        if wrapper is not None:
+            return wrapper
+
+        max_pages = batch_size * cdiv(self.model_config.max_model_len, self.page_size)
+
+        def int_buffer(size: int) -> torch.Tensor:
+            return torch.empty(size, dtype=torch.int32, device=self.device)
+
+        wrapper = BatchPrefillWithPagedKVCacheWrapper(
+            self._get_workspace_buffer(),
+            get_flashinfer_layout_string(self.kv_cache_layout),
+            backend="fa2",
+            use_cuda_graph=True,
+            qo_indptr_buf=int_buffer(batch_size + 1),
+            paged_kv_indptr_buf=int_buffer(batch_size + 1),
+            paged_kv_indices_buf=int_buffer(max_pages),
+            paged_kv_last_page_len_buf=int_buffer(batch_size),
+        )
+        self._sm75_spec_prefill_wrappers[key] = wrapper
+        logger.info(
+            "Created SM75 speculative FA2 graph wrapper: batch=%d, query=%d, "
+            "heads=%d/%d, head_dim=%d, page_size=%d, causal=%s",
+            batch_size,
+            query_len,
+            self.num_qo_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.page_size,
+            causal,
+        )
+        return wrapper
 
     def _get_decode_wrapper(self, batch_size: int, use_cudagraph: bool = False):
         if use_cudagraph:
@@ -1631,7 +1736,36 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     max_seq_len=max_seq_len,
                 )
             else:
-                prefill_wrapper = self._get_prefill_wrapper(causal=attn_metadata.causal)
+                use_sm75_spec_graph_wrapper = (
+                    self._sm75_spec_query_len is not None
+                    and common_prefix_len == 0
+                    and bool(attn_metadata.causal)
+                    and not self.use_dcp
+                    and not self.has_sinks
+                    and not prefill_use_trtllm
+                    and self.prefill_fixed_split_size in (-1, None)
+                    and not self.disable_split_kv
+                    and num_decodes == 0
+                    and num_prefills == 1
+                    and num_reqs == 1
+                    and num_prefill_tokens == self._sm75_spec_query_len
+                    and num_actual_tokens == self._sm75_spec_query_len
+                    and common_attn_metadata.max_query_len
+                    == self._sm75_spec_query_len
+                    and common_attn_metadata.query_start_loc_cpu.shape == (2,)
+                    and common_attn_metadata.query_start_loc_cpu.tolist()
+                    == [0, self._sm75_spec_query_len]
+                )
+                if use_sm75_spec_graph_wrapper:
+                    prefill_wrapper = self._get_sm75_spec_prefill_wrapper(
+                        num_prefills,
+                        self._sm75_spec_query_len,
+                        bool(attn_metadata.causal),
+                    )
+                else:
+                    prefill_wrapper = self._get_prefill_wrapper(
+                        causal=attn_metadata.causal
+                    )
                 # Slicing CPU buffers that are only needed for FI native prefills
                 paged_kv_last_page_len_prefill_cpu = self.paged_kv_last_page_len.cpu[
                     prefill_start:num_reqs
