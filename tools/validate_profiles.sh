@@ -81,6 +81,11 @@ while IFS= read -r -d '' file; do
     ((errors += 1))
   fi
 
+  if [[ -z "$kv" || "$kv" == "auto" || "$kv" == "default" ]]; then
+    echo "ERROR $rel: KV_CACHE_DTYPE must explicitly name the stored KV precision" >&2
+    ((errors += 1))
+  fi
+
   while IFS= read -r key; do
     [[ -n "$key" ]] || continue
     if profile_key_is_global "$key"; then
@@ -113,7 +118,7 @@ while IFS= read -r -d '' file; do
 
   if (( has_safe )); then
     case "$kv" in
-      ""|fp16|default|auto)
+      float16)
         ;;
       *)
         if [[ "$mtp" =~ ^[0-9]+$ ]] && (( mtp > 0 )); then
