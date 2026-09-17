@@ -65,6 +65,60 @@ def test_grouped_conv_preserves_a_wide_sm75_residual_boundary():
     torch.testing.assert_close(actual, torch.full((1, 2), 80000.0))
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("output_dtype", [None, torch.float32])
+def test_grouped_conv_cuda_matches_sm75_decode_shape(output_dtype):
+    torch.manual_seed(20260916)
+    rows, block_size, taps = 8, 8, 2
+    num_groups, group_size = 320, 16
+    hidden = torch.randn(
+        rows,
+        num_groups * group_size,
+        device="cuda",
+        dtype=torch.float16,
+    )
+    delta = torch.randn(
+        rows,
+        taps,
+        num_groups,
+        device="cuda",
+        dtype=torch.float16,
+    )
+    base = torch.randn(
+        taps,
+        num_groups * group_size,
+        device="cuda",
+        dtype=torch.float16,
+    )
+
+    actual = _grouped_conv(
+        hidden,
+        delta,
+        base,
+        block_size,
+        num_groups,
+        group_size,
+        taps,
+        output_dtype=output_dtype,
+    )
+
+    hidden_blocks = hidden.float().view(1, block_size, num_groups, group_size)
+    expected = torch.zeros_like(hidden_blocks)
+    base_blocks = base.float().view(taps, num_groups, group_size)
+    delta_blocks = delta.float().view(1, block_size, taps, num_groups)
+    for position in range(block_size):
+        for tap in range(min(taps, position + 1)):
+            expected[:, position] += (
+                base_blocks[tap] + delta_blocks[:, position, tap, :, None]
+            ) * hidden_blocks[:, position - tap]
+    expected = expected.flatten(0, 1).flatten(-2)
+    if output_dtype is None:
+        expected = expected.to(hidden.dtype)
+
+    assert actual.dtype is (output_dtype or hidden.dtype)
+    torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+
+
 def _bf16_boundary(value: torch.Tensor) -> torch.Tensor:
     return value.to(torch.bfloat16).float()
 
