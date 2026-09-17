@@ -516,6 +516,27 @@ effective_speculative_use_local_argmax_reduction() {
   esac
 }
 
+effective_speculative_draft_sample_method() {
+  local value
+
+  if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
+    value=$(json_config_field "$SPECULATIVE_CONFIG" draft_sample_method 2>/dev/null || true)
+  else
+    value=${SPECULATIVE_DRAFT_SAMPLE_METHOD:-}
+  fi
+  case "${value,,}" in
+    greedy|probabilistic)
+      printf '%s\n' "${value,,}"
+      ;;
+    "")
+      printf 'greedy\n'
+      ;;
+    *)
+      printf '%s\n' "${value,,}"
+      ;;
+  esac
+}
+
 trim_url_trailing_slash() {
   local value=${1:-}
   while [[ "$value" == */ ]]; do
@@ -1223,7 +1244,8 @@ save_manager_state() {
 	    printf 'SPECULATIVE_ATTENTION_BACKEND=%q\n' "${SPECULATIVE_ATTENTION_BACKEND:-}"
 	    printf 'SPECULATIVE_KV_CACHE_DTYPE=%q\n' "${SPECULATIVE_KV_CACHE_DTYPE:-}"
 	    printf 'SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH=%q\n' "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}"
-	    printf 'SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION=%q\n' "${SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION:-0}"
+    printf 'SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION=%q\n' "${SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION:-0}"
+    printf 'SPECULATIVE_DRAFT_SAMPLE_METHOD=%q\n' "${SPECULATIVE_DRAFT_SAMPLE_METHOD:-greedy}"
 	    printf 'MESSAGE_TYPE=%q\n' "${MESSAGE_TYPE:-}"
 	    printf 'MM_LIMIT_JSON=%q\n' "${MM_LIMIT_JSON:-}"
     printf 'LANGUAGE_MODEL_ONLY=%q\n' "${LANGUAGE_MODEL_ONLY:-}"
@@ -3308,6 +3330,7 @@ clear_speculative_decode_settings() {
   SPECULATIVE_KV_CACHE_DTYPE=""
   SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH=0
   SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION=0
+  SPECULATIVE_DRAFT_SAMPLE_METHOD=""
   SPECULATIVE_CONFIG=""
 }
 
@@ -3329,6 +3352,7 @@ configure_dflash_shortcut() {
   local disable_padded=${6:-0}
   local use_local_argmax=${7:-0}
   local kv_cache_dtype=${8:-}
+  local draft_sample_method=${9:-greedy}
 
   clear_speculative_decode_settings
   SPECULATIVE_METHOD=dflash
@@ -3338,6 +3362,7 @@ configure_dflash_shortcut() {
   SPECULATIVE_MAX_MODEL_LEN=$draft_max_model_len
   SPECULATIVE_ATTENTION_BACKEND=$attention_backend
   SPECULATIVE_KV_CACHE_DTYPE=$kv_cache_dtype
+  SPECULATIVE_DRAFT_SAMPLE_METHOD=$draft_sample_method
   SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH=$disable_padded
   SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION=$use_local_argmax
 }
@@ -3351,7 +3376,7 @@ configure_speculative_json() {
 
 edit_speculative_decode_menu() {
   local current method_choice tokens default_tokens spec_json
-  local draft_model draft_tp draft_max_model_len attention_backend kv_cache_dtype disable_padded use_local_argmax
+  local draft_model draft_tp draft_max_model_len attention_backend kv_cache_dtype disable_padded use_local_argmax draft_sample_method
 
   current=$(current_speculative_label)
   method_choice=$(menu_select "Spec decode" "$current" disabled mtp dflash dflash2 raw-json) || return 0
@@ -3379,6 +3404,7 @@ edit_speculative_decode_menu() {
       draft_max_model_len=$(prompt_optional "DFlash draft max_model_len" "${SPECULATIVE_MAX_MODEL_LEN:-}") || return 0
       attention_backend=$(prompt_optional "DFlash draft attention backend" "${SPECULATIVE_ATTENTION_BACKEND:-}") || return 0
       kv_cache_dtype=$(prompt_default "DFlash draft KV cache dtype" "${SPECULATIVE_KV_CACHE_DTYPE:-float16}") || return 0
+      draft_sample_method=$(menu_select "DFlash draft sample method" "$(effective_speculative_draft_sample_method)" greedy probabilistic) || return 0
       disable_padded=$(prompt_toggle01 "Disable padded drafter batch" "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}") || return 0
       use_local_argmax=$(prompt_toggle01 "Use local argmax reduction" "${SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION:-0}") || return 0
       configure_dflash_shortcut \
@@ -3389,7 +3415,8 @@ edit_speculative_decode_menu() {
         "$attention_backend" \
         "$disable_padded" \
         "$use_local_argmax" \
-        "$kv_cache_dtype"
+        "$kv_cache_dtype" \
+        "$draft_sample_method"
       ;;
     raw-json)
       spec_json=$(prompt_optional "Speculative config JSON" "${SPECULATIVE_CONFIG:-}") || return 0
@@ -4209,14 +4236,15 @@ build_generated_speculative_config() {
   local backend=${3:-}
   local use_local_argmax=${4:-0}
   local kv_cache_dtype=${SPECULATIVE_KV_CACHE_DTYPE:-}
+  local draft_sample_method=${5:-greedy}
 
   python3 - "$method" "$tokens" "${SPECULATIVE_MODEL:-}" \
     "${SPECULATIVE_DRAFT_TP_SIZE:-}" "${SPECULATIVE_MAX_MODEL_LEN:-}" \
-    "$backend" "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}" "$use_local_argmax" "$kv_cache_dtype" <<'PY'
+    "$backend" "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}" "$use_local_argmax" "$kv_cache_dtype" "$draft_sample_method" <<'PY'
 import json
 import sys
 
-method, tokens, model, draft_tp, max_model_len, backend, disable_padded, use_local_argmax, kv_cache_dtype = sys.argv[1:]
+method, tokens, model, draft_tp, max_model_len, backend, disable_padded, use_local_argmax, kv_cache_dtype, draft_sample_method = sys.argv[1:]
 
 cfg = {
     "method": method,
@@ -4233,6 +4261,8 @@ if method == "dflash":
         cfg["attention_backend"] = backend
     if kv_cache_dtype:
         cfg["kv_cache_dtype"] = kv_cache_dtype
+    if draft_sample_method:
+        cfg["draft_sample_method"] = draft_sample_method
     if disable_padded in {"1", "true", "True", "yes", "on"}:
         cfg["disable_padded_drafter_batch"] = True
 if use_local_argmax in {"1", "true", "True", "yes", "on"}:
@@ -4243,10 +4273,10 @@ PY
 }
 
 validate_speculative_route() {
-  local method tokens backend json_status
+  local method tokens backend json_status draft_sample_method
 
   if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
-    if [[ -n "${SPECULATIVE_METHOD:-}" || -n "${SPECULATIVE_MODEL:-}" || -n "${SPECULATIVE_TOKENS:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" || -n "${SPECULATIVE_KV_CACHE_DTYPE:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH || config_key_has_explicit_value SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION || ([[ "${MTP_K:-0}" =~ ^[0-9]+$ ]] && (( MTP_K > 0 ))); then
+    if [[ -n "${SPECULATIVE_METHOD:-}" || -n "${SPECULATIVE_MODEL:-}" || -n "${SPECULATIVE_TOKENS:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" || -n "${SPECULATIVE_KV_CACHE_DTYPE:-}" || -n "${SPECULATIVE_DRAFT_SAMPLE_METHOD:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH || config_key_has_explicit_value SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION || ([[ "${MTP_K:-0}" =~ ^[0-9]+$ ]] && (( MTP_K > 0 ))); then
       echo "ERROR: SPECULATIVE_CONFIG must not be mixed with shortcut speculative fields or MTP_K." >&2
       return 1
     fi
@@ -4256,14 +4286,31 @@ validate_speculative_route() {
       echo "ERROR: SPECULATIVE_CONFIG is not valid JSON." >&2
       return 1
     fi
+    draft_sample_method=$(effective_speculative_draft_sample_method)
+    case "$draft_sample_method" in
+      greedy|probabilistic) ;;
+      *)
+        echo "ERROR: DFlash draft sample method must be greedy or probabilistic, got $draft_sample_method." >&2
+        return 1
+        ;;
+    esac
     return 0
   fi
+
+  draft_sample_method=$(effective_speculative_draft_sample_method)
+  case "$draft_sample_method" in
+    greedy|probabilistic) ;;
+    *)
+      echo "ERROR: DFlash draft sample method must be greedy or probabilistic, got $draft_sample_method." >&2
+      return 1
+      ;;
+  esac
 
   method=$(effective_speculative_method)
   tokens=$(effective_speculative_tokens)
 
   if [[ -z "$method" ]]; then
-    if [[ -n "${SPECULATIVE_MODEL:-}" || -n "${SPECULATIVE_TOKENS:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" || -n "${SPECULATIVE_KV_CACHE_DTYPE:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH || config_key_has_explicit_value SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION; then
+    if [[ -n "${SPECULATIVE_MODEL:-}" || -n "${SPECULATIVE_TOKENS:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" || -n "${SPECULATIVE_KV_CACHE_DTYPE:-}" || -n "${SPECULATIVE_DRAFT_SAMPLE_METHOD:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH || config_key_has_explicit_value SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION; then
       echo "ERROR: speculative fields were set but SPECULATIVE_METHOD is missing." >&2
       echo "       Use SPECULATIVE_METHOD=mtp|dflash or provide SPECULATIVE_CONFIG." >&2
       return 1
@@ -4579,7 +4626,7 @@ build_args() {
     VLLM_ARGS+=(--speculative-config "$SPECULATIVE_CONFIG")
   elif [[ -n "$spec_method" && "$spec_tokens" =~ ^[0-9]+$ ]] && (( spec_tokens > 0 )); then
     generated_speculative_config=$(build_generated_speculative_config \
-      "$spec_method" "$spec_tokens" "$(effective_speculative_attention_backend)" "$(effective_speculative_use_local_argmax_reduction)")
+      "$spec_method" "$spec_tokens" "$(effective_speculative_attention_backend)" "$(effective_speculative_use_local_argmax_reduction)" "$(effective_speculative_draft_sample_method)")
     VLLM_ARGS+=(--speculative-config "$generated_speculative_config")
   fi
 
