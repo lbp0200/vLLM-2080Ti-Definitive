@@ -86,9 +86,9 @@ cd vLLM-2080Ti-Definitive
 ```
 
 Run `./launcher.sh` to configure and manage a service interactively. It can
-select the checkpoint and profile, configure GPU and TP/PP topology, choose the
-launch mode and network settings, start the service with health and smoke
-checks, and stop a running service.
+select target and DFlash draft checkpoints, apply a profile, configure GPU and
+TP/PP topology, choose the launch mode and network settings, start the service
+with health and smoke checks, and stop a running service.
 
 ![launcher.sh interactive main menu](docs/assets/launcher-main-menu.png)
 
@@ -122,7 +122,7 @@ Available modes:
 - `safe`: conservative fallback for troubleshooting and compatibility.
 
 The profile selects only route parameters. The launcher owns GPU selection,
-port, model path, chat template, and reasoning defaults.
+port, target and draft model paths, chat template, and reasoning defaults.
 
 ## 🛠️ Hardware Target
 

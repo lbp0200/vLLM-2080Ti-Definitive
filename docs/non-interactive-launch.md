@@ -44,7 +44,9 @@ the service:
 
 | Option | Purpose | Example |
 | --- | --- | --- |
-| `--model-dir` | Checkpoint directory | `/mnt/models/Qwen3.8-27B-FP8` |
+| `--model-dir` | Target checkpoint directory | `/mnt/models/Qwen3.8-27B-FP8` |
+| `--speculative-model` | DFlash draft path or model repo | `incoai/Qwen3.8-27B-DFlash2` |
+| `--per-request-spec-decode-metrics` | `none`, `summary`, or `detailed` | `detailed` |
 | `--profile` | Route preset relative to `profiles/` | `2x2080Ti/qwen27b/w8a16/...env` |
 | `--mode` | `safe`, `normal`, `fast`, or `aggressive` | `fast` |
 | `--gpu-devices` | Physical GPU IDs | `4,5` |
@@ -61,6 +63,7 @@ advanced launcher or `VLLM_*` settings, use `--set KEY=VALUE`; use
 ```bash
 ./launcher.sh \
   --model-dir /path/to/checkpoint \
+  --speculative-model incoai/Qwen3.8-27B-DFlash2 \
   --profile 2x2080Ti/qwen27b/w4a16/fast/dflash2-tqk8v4-1x256k-text-image.env \
   --mode fast \
   --gpu-devices 0,1 \
@@ -71,6 +74,7 @@ advanced launcher or `VLLM_*` settings, use `--set KEY=VALUE`; use
 
 Configuration precedence is `CLI > exported environment > profile > default`.
 Boolean options accept `0/1`; a boolean flag without a value means `1`.
+Profiles never store target or draft model paths.
 
 ## Environment Variable Form
 

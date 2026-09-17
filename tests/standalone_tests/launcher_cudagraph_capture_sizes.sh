@@ -26,9 +26,11 @@ assert_capture_sizes 7 2 "8,16"
 assert_capture_sizes 7 3 "8,16,24"
 assert_capture_sizes 5 3 "6,12,18"
 
-unset LONG_PREFILL_TOKEN_THRESHOLD PREFILL_BATCH_BARRIER
+unset LONG_PREFILL_TOKEN_THRESHOLD PREFILL_BATCH_BARRIER TP_SIZE
 apply_profile_overrides \
   "$ROOT/profiles/2x2080Ti/qwen27b/w4a16/fast/dflash2-tqk8v4-2x172k-text-only.env"
+TP_SIZE=2
+apply_speculative_runtime_defaults
 [[ "$LONG_PREFILL_TOKEN_THRESHOLD" == "2560" ]]
 [[ -z "${PREFILL_BATCH_BARRIER:-}" ]]
 

@@ -81,9 +81,9 @@ cd vLLM-2080Ti-Definitive
 ./build.sh
 ```
 
-运行 `./launcher.sh` 即可通过交互菜单配置和管理服务：选择模型权重与 Profile、
-设置 GPU 和 TP/PP 拓扑、选择启动模式与网络配置，并在启动时自动完成健康检查和
-smoke 测试；也可以在菜单中停止已启动的服务。
+运行 `./launcher.sh` 即可通过交互菜单配置和管理服务：分别选择 target 与 DFlash
+draft 权重、应用 Profile、设置 GPU 和 TP/PP 拓扑、选择启动模式与网络配置，并在
+启动时自动完成健康检查和 smoke 测试；也可以在菜单中停止已启动的服务。
 
 ![launcher.sh 交互式主菜单](docs/assets/launcher-main-menu.png)
 
@@ -115,8 +115,8 @@ Profile 按 `profiles/<硬件>/<模型>/<权重>/<模式>/<路线>.env` 组织�
 - `aggressive`：性能最高但质量风险也最高。
 - `safe`：用于排障和兼容性的保守回退模式。
 
-Profile 只选择路线参数。GPU、端口、模型路径、chat template 和 reasoning 默认值
-由 launcher 统一管理。
+Profile 只选择路线参数。GPU、端口、target 与 draft 模型路径、chat template 和
+reasoning 默认值由 launcher 统一管理。
 
 ## 🛠️ 目标硬件
 

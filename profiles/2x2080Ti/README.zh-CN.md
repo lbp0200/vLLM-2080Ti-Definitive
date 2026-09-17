@@ -17,8 +17,8 @@
 
 | Profile | 模式 | 上下文 | KV | 投机解码 | 消息 | GPU KV tokens | 4K/128 prefill / decode | 32K/512 prefill / decode |
 |---|---|---:|---|---:|---|---:|---:|---:|
-| `qwen27b/w4a16/fast/dflash2-fp16kv-1x256k-text-only.env` | fast | 256K x1 | FP16 | DFlash2/7 | text-only | 376,832 | 1465.02 / 220.69 | 1280.57 / 213.66 |
-| `qwen27b/w4a16/fast/dflash2-tqk8v4-2x172k-text-only.env` | fast | 172K x2 | TQK8V4 | DFlash2/7 | text-only | 384,474 | 1499.70 / 145.40 | 1314.00 / 117.00 |
+| `qwen27b/w4a16/fast/dflash2-fp16kv-1x256k-text-only.env` | fast | 256K x1 | FP16 | DFlash2（默认 K=7） | text-only | 376,832 | 1465.02 / 220.69 | 1280.57 / 213.66 |
+| `qwen27b/w4a16/fast/dflash2-tqk8v4-2x172k-text-only.env` | fast | 172K x2 | TQK8V4 | DFlash2（默认 K=7） | text-only | 384,474 | 1499.70 / 145.40 | 1314.00 / 117.00 |
 | `qwen27b/w4a16/normal/mtp-fp8kv-1x240k-text-image.env` | normal | 240K | FP8 | MTP/3 | text+image | 410,093 | 1442.55 / 73.96 | 1258.70 / 75.56 |
 
 ## Qwen3.6-35B-A3B-FP8

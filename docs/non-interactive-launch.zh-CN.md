@@ -42,7 +42,9 @@
 
 | 参数 | 用途 | 示例 |
 | --- | --- | --- |
-| `--model-dir` | 模型权重目录 | `/mnt/models/Qwen3.8-27B-FP8` |
+| `--model-dir` | target 模型权重目录 | `/mnt/models/Qwen3.8-27B-FP8` |
+| `--speculative-model` | DFlash draft 路径或模型仓库 | `incoai/Qwen3.8-27B-DFlash2` |
+| `--per-request-spec-decode-metrics` | `none`、`summary` 或 `detailed` | `detailed` |
 | `--profile` | 相对于 `profiles/` 的路线预设 | `2x2080Ti/qwen27b/w8a16/...env` |
 | `--mode` | `safe`、`normal`、`fast` 或 `aggressive` | `fast` |
 | `--gpu-devices` | 物理 GPU 编号 | `4,5` |
@@ -59,6 +61,7 @@ Launcher 默认值。
 ```bash
 ./launcher.sh \
   --model-dir /path/to/checkpoint \
+  --speculative-model incoai/Qwen3.8-27B-DFlash2 \
   --profile 2x2080Ti/qwen27b/w4a16/fast/dflash2-tqk8v4-1x256k-text-image.env \
   --mode fast \
   --gpu-devices 0,1 \
@@ -69,6 +72,7 @@ Launcher 默认值。
 
 配置优先级为 `CLI > 已导出的环境变量 > profile > 默认值`。布尔参数接受
 `0/1`；不带参数值的布尔选项等同于 `1`。
+Profile 不保存 target 或 draft 模型路径。
 
 ## 环境变量写法
 

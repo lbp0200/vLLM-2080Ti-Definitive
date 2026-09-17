@@ -38,35 +38,6 @@ VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH|SPECULATIVE_DRAFT_SAMPLE_METHOD)
   esac
 }
 
-profile_key_is_allowed() {
-  case "$1" in
-    SERVED_NAME|COMPATIBLE_MODES|MODEL_FAMILY|PROFILE_GROUP|MODEL_VARIANT|TP_SIZE|\
-QUANTIZATION|KV_CACHE_DTYPE|VLLM_KV_CACHE_LAYOUT|MAX_MODEL_LEN|\
-KV_CACHE_MEMORY_BYTES|GPU_UTIL|MAMBA_CACHE_MODE|\
-MAX_BATCHED_TOKENS|LONG_PREFILL_TOKEN_THRESHOLD|\
-MAX_NUM_SEQS|DISABLE_PREFIX_CACHING|MTP_K|\
-PER_REQUEST_SPEC_DECODE_METRICS|\
-MESSAGE_TYPE|MM_LIMIT_JSON|LANGUAGE_MODEL_ONLY|\
-SKIP_MM_PROFILING|HF_OVERRIDES_JSON|ADDITIONAL_CONFIG_JSON|\
-SPECULATIVE_METHOD|SPECULATIVE_MODEL|SPECULATIVE_TOKENS|SPECULATIVE_DRAFT_TP_SIZE|\
-SPECULATIVE_MAX_MODEL_LEN|SPECULATIVE_ATTENTION_BACKEND|SPECULATIVE_KV_CACHE_DTYPE|\
-SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH|SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION|\
-SPECULATIVE_CONFIG|ATTENTION_BACKEND|DISABLE_HYBRID_KV_CACHE_MANAGER|\
-DISABLE_CUSTOM_ALL_REDUCE|\
-VLLM_ALLOW_LONG_MAX_MODEL_LEN|VLLM_INT8KV_FA_PREFILL|\
-VLLM_INT8KV_FA_CONTINUATION_DEQUANT|VLLM_INT8KV_FA_CASCADE_DEQUANT|\
-VLLM_INT8KV_FA_CASCADE_TILE_TOKENS|\
-VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE|\
-VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS|\
-VLLM_TURBOQUANT_MAX_KV_SPLITS|VLLM_TURBOQUANT_DECODE_BLOCK_KV)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
 total=0
 errors=0
 
@@ -77,10 +48,12 @@ while IFS= read -r -d '' file; do
   compatible_modes=$(read_profile_value "$file" COMPATIBLE_MODES)
   kv=$(read_profile_value "$file" KV_CACHE_DTYPE)
   mtp=$(read_profile_value "$file" MTP_K)
+  speculative_method=$(read_profile_value "$file" SPECULATIVE_METHOD)
+  speculative_tokens=$(read_profile_value "$file" SPECULATIVE_TOKENS)
   has_safe=0
 
-  if [[ -n "$mode" ]]; then
-    echo "ERROR $rel: MODE should not be pinned inside a profile; use COMPATIBLE_MODES or launcher MODE" >&2
+  if [[ -n "$mode" && -n "$compatible_modes" ]]; then
+    echo "ERROR $rel: use MODE or legacy COMPATIBLE_MODES, not both" >&2
     ((errors += 1))
   fi
 
@@ -94,14 +67,14 @@ while IFS= read -r -d '' file; do
     if profile_key_is_global "$key"; then
       echo "ERROR $rel: $key is a global launcher setting and must not be stored in a route profile" >&2
       ((errors += 1))
-    elif ! profile_key_is_allowed "$key"; then
-      echo "ERROR $rel: $key is not an allowed route profile setting" >&2
-      ((errors += 1))
     fi
   done < <(sed -nE 's/^([A-Za-z_][A-Za-z0-9_]*)=.*/\1/p' "$file" | sort -u)
 
+  if [[ -n "$mode" ]]; then
+    compatible_modes=$mode
+  fi
   if [[ -z "$compatible_modes" ]]; then
-    echo "ERROR $rel: COMPATIBLE_MODES is required" >&2
+    echo "ERROR $rel: MODE or legacy COMPATIBLE_MODES is required" >&2
     ((errors += 1))
   else
     IFS=',' read -r -a mode_parts <<< "$compatible_modes"
@@ -119,13 +92,34 @@ while IFS= read -r -d '' file; do
     done
   fi
 
+  if [[ -n "$speculative_method" ]]; then
+    case "$speculative_method" in
+      none)
+        [[ "$speculative_tokens" == "0" ]] || {
+          echo "ERROR $rel: SPECULATIVE_METHOD=none requires SPECULATIVE_TOKENS=0" >&2
+          ((errors += 1))
+        }
+        ;;
+      mtp|dflash)
+        [[ "$speculative_tokens" =~ ^[1-9][0-9]*$ ]] || {
+          echo "ERROR $rel: $speculative_method requires positive SPECULATIVE_TOKENS" >&2
+          ((errors += 1))
+        }
+        ;;
+      *)
+        echo "ERROR $rel: unsupported SPECULATIVE_METHOD=$speculative_method" >&2
+        ((errors += 1))
+        ;;
+    esac
+  fi
+
   if (( has_safe )); then
     case "$kv" in
       float16)
         ;;
       *)
-        if [[ "$mtp" =~ ^[0-9]+$ ]] && (( mtp > 0 )); then
-          echo "ERROR $rel: safe quantized-KV profiles must set MTP_K=0, got MTP_K=$mtp KV=$kv" >&2
+        if { [[ "$mtp" =~ ^[0-9]+$ ]] && (( mtp > 0 )); } || [[ "$speculative_method" != "none" && "$speculative_tokens" =~ ^[1-9][0-9]*$ ]]; then
+          echo "ERROR $rel: safe quantized-KV profiles must disable speculative decoding, got KV=$kv" >&2
           ((errors += 1))
         fi
         ;;
