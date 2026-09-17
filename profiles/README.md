@@ -4,7 +4,8 @@ Language: English | [简体中文](README.zh-CN.md)
 
 Profiles are `.env` presets for route parameters. They do not select the
 checkpoint, GPUs, port, chat template, or reasoning defaults; those remain
-launcher settings. Select the model path separately with `MODEL_DIR`.
+launcher settings. Select the target with `MODEL_DIR` and the optional DFlash
+draft with `SPECULATIVE_MODEL`.
 
 Profiles are grouped by hardware first, then model family, weight format, and
 startup mode:
@@ -18,7 +19,11 @@ profiles/
 Profile filenames use `<decoder>-<kv>-<concurrency><context>-<message>.env`.
 For example, `dflash2-tqk8v4-2x172k-text-only.env` is a DFlash2 route using
 TQK8V4 KV, two concurrent requests, 172K context per request, and text-only
-messages. `MTP_K=0` means no MTP; `MTP_K=3` means MTP3.
+messages. Decode routing uses `SPECULATIVE_METHOD=none|mtp|dflash` and
+`SPECULATIVE_TOKENS`; the defaults are `0`, `3`, and `7`, respectively.
+Per-request speculative metrics are a Launcher setting:
+`PER_REQUEST_SPEC_DECODE_METRICS=none|summary|detailed`; DFlash defaults to
+`detailed` until changed in Launcher.
 
 Use `./launcher.sh --print-config` after selecting a profile to inspect the
 resolved route before starting the service.

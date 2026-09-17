@@ -18,7 +18,7 @@ LOG_DIR=${LOG_DIR:-"$MANAGER_ROOT/run-logs"}
 STATE_FILE=${STATE_FILE:-"$LOG_DIR/start-manager.state"}
 STAMP=$(date +%Y%m%d-%H%M%S)
 VERSION=${VERSION:-$FORK_RELEASE}
-MTP_K=${MTP_K:-3}
+MTP_K=${MTP_K:-0}
 MENU_DIGIT_TIMEOUT=${LAUNCHER_MENU_DIGIT_TIMEOUT:-0.8}
 HF_OFFICIAL_ENDPOINT=${HF_OFFICIAL_ENDPOINT:-https://huggingface.co}
 HF_MIRROR_ENDPOINT=${HF_MIRROR_ENDPOINT:-https://hf-mirror.com}
@@ -322,7 +322,8 @@ PY
 
 normalize_speculative_method_value() {
   case "${1,,}" in
-    ""|none|off|disabled) ;;
+    "") ;;
+    none|off|disabled) echo none ;;
     mtp) echo mtp ;;
     dflash|dflash2) echo dflash ;;
     *)
@@ -388,22 +389,19 @@ effective_speculative_method() {
     return 0
   fi
 
-  model_ref=$(effective_speculative_model)
-  if [[ -n "$model_ref" ]]; then
-    method=$(infer_speculative_method_from_model_ref "$model_ref")
-    if [[ -n "$method" ]]; then
-      printf '%s\n' "$method"
-      return 0
-    fi
-  fi
-
   if [[ "${MTP_K:-0}" =~ ^[0-9]+$ ]] && (( MTP_K > 0 )); then
     printf 'mtp\n'
   fi
 }
 
 effective_speculative_tokens() {
-  local tokens
+  local method tokens
+
+  method=$(effective_speculative_method)
+  if [[ "$method" == "none" ]]; then
+    printf '0\n'
+    return 0
+  fi
 
   if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
     tokens=$(json_config_field "$SPECULATIVE_CONFIG" num_speculative_tokens 2>/dev/null || true)
@@ -427,7 +425,11 @@ effective_speculative_tokens() {
     return 0
   fi
 
-  printf '0\n'
+  case "$method" in
+    dflash) printf '7\n' ;;
+    mtp) printf '3\n' ;;
+    *) printf '0\n' ;;
+  esac
 }
 
 speculative_cudagraph_capture_sizes() {
@@ -466,6 +468,7 @@ default_speculative_attention_backend() {
   local method
   method=$(effective_speculative_method)
   [[ "$method" == "dflash" ]] || return 0
+  printf 'TRITON_ATTN\n'
 }
 
 effective_speculative_attention_backend() {
@@ -729,7 +732,7 @@ current_speculative_label() {
 
   if [[ "$method" == "dflash" ]]; then
     draft_ref=$(effective_speculative_model)
-    draft_ref=${draft_ref:-embedded-speculator}
+    draft_ref=${draft_ref:-draft-not-set}
     draft_ref=${draft_ref##*/}
     if [[ "${draft_ref,,}" == *dflash2* ]]; then
       printf 'dflash2/%s (%s%s)\n' "$tokens" "$draft_ref" "$suffix"
@@ -788,6 +791,7 @@ profile_speculative_label() {
 
 ROUTE_PROFILE_KEYS=(
   SERVED_NAME
+  MODE
   COMPATIBLE_MODES
   MODEL_FAMILY
   PROFILE_GROUP
@@ -804,8 +808,7 @@ ROUTE_PROFILE_KEYS=(
   NO_ASYNC_SCHEDULING
   MTP_K
   SPECULATIVE_METHOD
-  SPECULATIVE_MODEL
-    VLLM_TURBOQUANT_SPEC_DECODE_CHUNK_SIZE
+  VLLM_TURBOQUANT_SPEC_DECODE_CHUNK_SIZE
   SPECULATIVE_TOKENS
   SPECULATIVE_DRAFT_TP_SIZE
   SPECULATIVE_MAX_MODEL_LEN
@@ -821,6 +824,7 @@ ROUTE_PROFILE_KEYS=(
   ADDITIONAL_CONFIG_JSON
   SPECULATIVE_CONFIG
   COMPILATION_CONFIG_JSON
+  VLLM_KV_CACHE_LAYOUT
   ATTENTION_BACKEND
   DISABLE_HYBRID_KV_CACHE_MANAGER
   CUSTOM_ALL_REDUCE_MODE
@@ -835,6 +839,8 @@ ROUTE_PROFILE_KEYS=(
 
 NON_INTERACTIVE_CONFIG_KEYS=(
   MODEL_DIR
+  SPECULATIVE_MODEL
+  PER_REQUEST_SPEC_DECODE_METRICS
   PROFILE_DIR
   PROFILE
   PROFILE_FILE
@@ -1140,7 +1146,7 @@ reset_route_profile_fields() {
 
 profile_key_is_global() {
   case "$1" in
-MODEL_DIR|PROFILE_DIR|PROFILE|MODE|PORT|SERVICE_SCOPE|GPU_DEVICES|\
+MODEL_DIR|SPECULATIVE_MODEL|PER_REQUEST_SPEC_DECODE_METRICS|PROFILE_DIR|PROFILE|PORT|SERVICE_SCOPE|GPU_DEVICES|\
 CHAT_TEMPLATE_FILE|CHAT_TEMPLATE_PRESET|TEMPLATE_DIR|REASONING_PARSER|\
 DEFAULT_CHAT_TEMPLATE_KWARGS|REASONING_MODE|REASONING_BUDGET|\
 ENABLE_AUTO_TOOL_CHOICE|TOOL_CALL_PARSER|TOOL_PARSER_PLUGIN|\
@@ -1236,19 +1242,20 @@ save_manager_state() {
     printf 'MAX_BATCHED_TOKENS=%q\n' "${MAX_BATCHED_TOKENS:-}"
     printf 'MAX_NUM_SEQS=%q\n' "${MAX_NUM_SEQS:-}"
     printf 'LONG_PREFILL_TOKEN_THRESHOLD=%q\n' "${LONG_PREFILL_TOKEN_THRESHOLD:-}"
-	    printf 'MTP_K=%q\n' "${MTP_K:-}"
-	    printf 'SPECULATIVE_METHOD=%q\n' "${SPECULATIVE_METHOD:-}"
-	    printf 'SPECULATIVE_MODEL=%q\n' "${SPECULATIVE_MODEL:-}"
-	    printf 'SPECULATIVE_TOKENS=%q\n' "${SPECULATIVE_TOKENS:-}"
-	    printf 'SPECULATIVE_DRAFT_TP_SIZE=%q\n' "${SPECULATIVE_DRAFT_TP_SIZE:-}"
-	    printf 'SPECULATIVE_MAX_MODEL_LEN=%q\n' "${SPECULATIVE_MAX_MODEL_LEN:-}"
-	    printf 'SPECULATIVE_ATTENTION_BACKEND=%q\n' "${SPECULATIVE_ATTENTION_BACKEND:-}"
-	    printf 'SPECULATIVE_KV_CACHE_DTYPE=%q\n' "${SPECULATIVE_KV_CACHE_DTYPE:-}"
-	    printf 'SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH=%q\n' "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}"
+    printf 'MTP_K=%q\n' "${MTP_K:-}"
+    printf 'SPECULATIVE_METHOD=%q\n' "${SPECULATIVE_METHOD:-}"
+    printf 'SPECULATIVE_MODEL=%q\n' "${SPECULATIVE_MODEL:-}"
+    printf 'SPECULATIVE_TOKENS=%q\n' "${SPECULATIVE_TOKENS:-}"
+    printf 'SPECULATIVE_DRAFT_TP_SIZE=%q\n' "${SPECULATIVE_DRAFT_TP_SIZE:-}"
+    printf 'SPECULATIVE_MAX_MODEL_LEN=%q\n' "${SPECULATIVE_MAX_MODEL_LEN:-}"
+    printf 'SPECULATIVE_ATTENTION_BACKEND=%q\n' "${SPECULATIVE_ATTENTION_BACKEND:-}"
+    printf 'SPECULATIVE_KV_CACHE_DTYPE=%q\n' "${SPECULATIVE_KV_CACHE_DTYPE:-}"
+    printf 'SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH=%q\n' "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}"
     printf 'SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION=%q\n' "${SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION:-0}"
     printf 'SPECULATIVE_DRAFT_SAMPLE_METHOD=%q\n' "${SPECULATIVE_DRAFT_SAMPLE_METHOD:-greedy}"
-	    printf 'MESSAGE_TYPE=%q\n' "${MESSAGE_TYPE:-}"
-	    printf 'MM_LIMIT_JSON=%q\n' "${MM_LIMIT_JSON:-}"
+    printf 'PER_REQUEST_SPEC_DECODE_METRICS=%q\n' "${PER_REQUEST_SPEC_DECODE_METRICS:-}"
+    printf 'MESSAGE_TYPE=%q\n' "${MESSAGE_TYPE:-}"
+    printf 'MM_LIMIT_JSON=%q\n' "${MM_LIMIT_JSON:-}"
     printf 'LANGUAGE_MODEL_ONLY=%q\n' "${LANGUAGE_MODEL_ONLY:-}"
     printf 'SKIP_MM_PROFILING=%q\n' "${SKIP_MM_PROFILING:-}"
     printf 'HF_OVERRIDES_JSON=%q\n' "${HF_OVERRIDES_JSON:-}"
@@ -2497,7 +2504,7 @@ show_help() {
 This is the vLLM 2080 Ti Definitive service manager for a source checkout.
 
 Main menu:
-  1. Weight directory: choose the checkpoint directory.
+  1. Model weights: choose the target checkpoint and optional DFlash draft.
   2. Profile: choose a profile directory, apply .env route presets, select a
      chat-template preset, and edit the filled runtime parameters.
   3. GPU / TP / PP selection: choose target GPUs, select a valid TP x PP
@@ -2787,12 +2794,14 @@ select_gpu_devices_menu() {
 }
 
 select_weight_dir() {
-  local selected
-  selected=$(prompt_required_dir "Weight/checkpoint directory" "${MODEL_DIR:-}") || return 0
+  local selected draft_model
+  selected=$(prompt_required_dir "Target model checkpoint directory" "${MODEL_DIR:-}") || return 0
   MODEL_DIR="$selected"
   MODEL_FAMILY=$(guess_model_family "$MODEL_DIR")
   QUANTIZATION=$(guess_quantization "$MODEL_DIR")
   SERVED_NAME=$(basename "$MODEL_DIR")
+  draft_model=$(prompt_optional "Draft model path or repo (DFlash only)" "${SPECULATIVE_MODEL:-}") || return 0
+  SPECULATIVE_MODEL="$draft_model"
   save_manager_state
 }
 
@@ -2841,7 +2850,7 @@ apply_profile_preset_menu() {
 }
 
 save_current_profile_menu() {
-  local family_dir profile_name safe_name target_dir target_file answer compatible_modes
+  local family_dir profile_name safe_name target_dir target_file answer
 
   if ! is_tty; then
     return 0
@@ -2867,53 +2876,27 @@ save_current_profile_menu() {
   done
 
   mkdir -p "$target_dir"
-  compatible_modes=$(profile_compatible_modes_for_current)
   : > "$target_file.tmp"
   write_profile_entry "$target_file.tmp" SERVED_NAME "${SERVED_NAME:-$safe_name}"
-  write_profile_entry "$target_file.tmp" COMPATIBLE_MODES "$compatible_modes"
+  write_profile_entry "$target_file.tmp" MODE "${MODE:-normal}"
   write_profile_entry "$target_file.tmp" MODEL_FAMILY "${MODEL_FAMILY:-}"
   write_profile_entry "$target_file.tmp" PROFILE_GROUP "${PROFILE_GROUP:-}"
   write_profile_entry "$target_file.tmp" MODEL_VARIANT "${MODEL_VARIANT:-}"
-  write_profile_entry "$target_file.tmp" TP_SIZE "${TP_SIZE:-}"
-  write_profile_entry "$target_file.tmp" PP_SIZE "${PP_SIZE:-}"
   write_profile_entry "$target_file.tmp" QUANTIZATION "${QUANTIZATION:-}"
   write_profile_entry "$target_file.tmp" KV_CACHE_DTYPE "${KV_CACHE_DTYPE:-}"
   write_profile_entry "$target_file.tmp" MAX_MODEL_LEN "${MAX_MODEL_LEN:-}"
   write_profile_entry "$target_file.tmp" GPU_UTIL "${GPU_UTIL:-}"
   write_profile_entry "$target_file.tmp" MAX_BATCHED_TOKENS "${MAX_BATCHED_TOKENS:-}"
   write_profile_entry "$target_file.tmp" MAX_NUM_SEQS "${MAX_NUM_SEQS:-}"
-  write_profile_entry "$target_file.tmp" LONG_PREFILL_TOKEN_THRESHOLD "${LONG_PREFILL_TOKEN_THRESHOLD:-}"
-  write_profile_entry "$target_file.tmp" NO_ASYNC_SCHEDULING "${NO_ASYNC_SCHEDULING:-}"
-  write_profile_entry "$target_file.tmp" MTP_K "${MTP_K:-}"
-  write_profile_entry "$target_file.tmp" SPECULATIVE_METHOD "${SPECULATIVE_METHOD:-}"
-  write_profile_entry "$target_file.tmp" SPECULATIVE_MODEL "${SPECULATIVE_MODEL:-}"
-  write_profile_entry "$target_file.tmp" VLLM_TURBOQUANT_SPEC_DECODE_CHUNK_SIZE "${VLLM_TURBOQUANT_SPEC_DECODE_CHUNK_SIZE:-}"
-  write_profile_entry "$target_file.tmp" SPECULATIVE_TOKENS "${SPECULATIVE_TOKENS:-}"
-  write_profile_entry "$target_file.tmp" SPECULATIVE_DRAFT_TP_SIZE "${SPECULATIVE_DRAFT_TP_SIZE:-}"
-  write_profile_entry "$target_file.tmp" SPECULATIVE_MAX_MODEL_LEN "${SPECULATIVE_MAX_MODEL_LEN:-}"
-  write_profile_entry "$target_file.tmp" SPECULATIVE_ATTENTION_BACKEND "${SPECULATIVE_ATTENTION_BACKEND:-}"
-  write_profile_entry "$target_file.tmp" SPECULATIVE_KV_CACHE_DTYPE "${SPECULATIVE_KV_CACHE_DTYPE:-}"
-  write_profile_entry "$target_file.tmp" SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-}"
-  write_profile_entry "$target_file.tmp" SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION "${SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION:-}"
-  write_profile_entry "$target_file.tmp" MESSAGE_TYPE "${MESSAGE_TYPE:-}"
-  write_profile_entry "$target_file.tmp" MM_LIMIT_JSON "${MM_LIMIT_JSON:-}"
-  write_profile_entry "$target_file.tmp" LANGUAGE_MODEL_ONLY "${LANGUAGE_MODEL_ONLY:-}"
-  write_profile_entry "$target_file.tmp" SKIP_MM_PROFILING "${SKIP_MM_PROFILING:-}"
-  write_profile_entry "$target_file.tmp" HF_OVERRIDES_JSON "${HF_OVERRIDES_JSON:-}"
-  write_profile_entry "$target_file.tmp" ADDITIONAL_CONFIG_JSON "${ADDITIONAL_CONFIG_JSON:-}"
-  write_profile_entry "$target_file.tmp" SPECULATIVE_CONFIG "${SPECULATIVE_CONFIG:-}"
-  write_profile_entry "$target_file.tmp" ATTENTION_BACKEND "${ATTENTION_BACKEND:-}"
-  write_profile_entry "$target_file.tmp" DISABLE_HYBRID_KV_CACHE_MANAGER "${DISABLE_HYBRID_KV_CACHE_MANAGER:-}"
-  write_profile_entry "$target_file.tmp" CUSTOM_ALL_REDUCE_MODE "${CUSTOM_ALL_REDUCE_MODE:-}"
-  if [[ -z "${CUSTOM_ALL_REDUCE_MODE:-}" ]]; then
-    write_profile_entry "$target_file.tmp" DISABLE_CUSTOM_ALL_REDUCE "${DISABLE_CUSTOM_ALL_REDUCE:-}"
-  fi
+  write_profile_entry "$target_file.tmp" SPECULATIVE_METHOD "${SPECULATIVE_METHOD:-none}"
+  write_profile_entry "$target_file.tmp" SPECULATIVE_TOKENS "$(effective_speculative_tokens)"
+  write_profile_entry "$target_file.tmp" MESSAGE_TYPE "${MESSAGE_TYPE:-text-only}"
   mv "$target_file.tmp" "$target_file"
 
   PROFILE="$family_dir/user/${safe_name}.env"
   save_manager_state
   echo "Saved profile: $target_file"
-  echo "Compatible mode: $compatible_modes"
+  echo "Launch mode: ${MODE:-normal}"
   echo
   pause_enter
 }
@@ -3322,8 +3305,9 @@ edit_prefix_cache_menu() {
 clear_speculative_decode_settings() {
   MTP_K=0
   SPECULATIVE_METHOD=""
-  SPECULATIVE_MODEL=""
   SPECULATIVE_TOKENS=""
+  VLLM_KV_CACHE_LAYOUT=""
+  LONG_PREFILL_TOKEN_THRESHOLD=""
   SPECULATIVE_DRAFT_TP_SIZE=""
   SPECULATIVE_MAX_MODEL_LEN=""
   SPECULATIVE_ATTENTION_BACKEND=""
@@ -3332,6 +3316,15 @@ clear_speculative_decode_settings() {
   SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION=0
   SPECULATIVE_DRAFT_SAMPLE_METHOD=""
   SPECULATIVE_CONFIG=""
+}
+
+edit_spec_decode_metrics_menu() {
+  local current choice
+
+  current=${PER_REQUEST_SPEC_DECODE_METRICS:-none}
+  choice=$(menu_select "Per-request speculative metrics" "$current" none summary detailed) || return 0
+  PER_REQUEST_SPEC_DECODE_METRICS=$choice
+  save_manager_state
 }
 
 configure_mtp_shortcut() {
@@ -3396,7 +3389,7 @@ edit_speculative_decode_menu() {
     dflash|dflash2)
       default_tokens=$(effective_speculative_tokens)
       if [[ "$default_tokens" == "0" ]]; then
-        default_tokens=${SPECULATIVE_TOKENS:-3}
+        default_tokens=${SPECULATIVE_TOKENS:-7}
       fi
       draft_model=$(prompt_default "DFlash2 draft model path or repo" "$(effective_speculative_model)") || return 0
       tokens=$(prompt_default "DFlash speculative tokens" "$default_tokens") || return 0
@@ -3433,7 +3426,7 @@ runtime_parameter_menu() {
   local selected choices=()
   local model_family_value profile_group_value model_variant_value served_name_value
   local quantization_value kv_value context_value gpu_util_value
-  local batch_tokens_value max_sequences_value spec_decode_value message_type_value
+  local batch_tokens_value max_sequences_value spec_decode_value spec_metrics_value message_type_value
   local template_value reasoning_value tool_calling_value prefix_cache_value
   local ple_placement_value
 
@@ -3449,6 +3442,7 @@ runtime_parameter_menu() {
     batch_tokens_value=$(menu_value "${MAX_BATCHED_TOKENS:-2048}")
     max_sequences_value=$(menu_value "${MAX_NUM_SEQS:-1}")
     spec_decode_value=$(menu_value "$(current_speculative_label)")
+    spec_metrics_value=$(menu_value "${PER_REQUEST_SPEC_DECODE_METRICS:-none}")
     message_type_value=$(menu_value "${MESSAGE_TYPE:-text-only}")
     template_value=$(menu_value "$(current_template_label)")
     reasoning_value=$(menu_value "$(current_reasoning_label)")
@@ -3473,6 +3467,7 @@ runtime_parameter_menu() {
       "Batch tokens: $batch_tokens_value"
       "Max sequences: $max_sequences_value"
       "Spec decode: $spec_decode_value"
+      "Spec metrics: $spec_metrics_value"
       "Message type: $message_type_value"
       "Chat template: $template_value"
       "Reasoning defaults: $reasoning_value"
@@ -3526,6 +3521,9 @@ runtime_parameter_menu() {
       "Spec decode:"*)
         edit_speculative_decode_menu
         save_manager_state
+        ;;
+      "Spec metrics:"*)
+        edit_spec_decode_metrics_menu
         ;;
       "Message type:"*)
         edit_message_type_menu
@@ -4276,7 +4274,7 @@ validate_speculative_route() {
   local method tokens backend json_status draft_sample_method
 
   if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
-    if [[ -n "${SPECULATIVE_METHOD:-}" || -n "${SPECULATIVE_MODEL:-}" || -n "${SPECULATIVE_TOKENS:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" || -n "${SPECULATIVE_KV_CACHE_DTYPE:-}" || -n "${SPECULATIVE_DRAFT_SAMPLE_METHOD:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH || config_key_has_explicit_value SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION || ([[ "${MTP_K:-0}" =~ ^[0-9]+$ ]] && (( MTP_K > 0 ))); then
+    if [[ -n "${SPECULATIVE_METHOD:-}" || -n "${SPECULATIVE_TOKENS:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" || -n "${SPECULATIVE_KV_CACHE_DTYPE:-}" || -n "${SPECULATIVE_DRAFT_SAMPLE_METHOD:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH || config_key_has_explicit_value SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION || ([[ "${MTP_K:-0}" =~ ^[0-9]+$ ]] && (( MTP_K > 0 ))); then
       echo "ERROR: SPECULATIVE_CONFIG must not be mixed with shortcut speculative fields or MTP_K." >&2
       return 1
     fi
@@ -4310,9 +4308,17 @@ validate_speculative_route() {
   tokens=$(effective_speculative_tokens)
 
   if [[ -z "$method" ]]; then
-    if [[ -n "${SPECULATIVE_MODEL:-}" || -n "${SPECULATIVE_TOKENS:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" || -n "${SPECULATIVE_KV_CACHE_DTYPE:-}" || -n "${SPECULATIVE_DRAFT_SAMPLE_METHOD:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH || config_key_has_explicit_value SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION; then
+    if [[ -n "${SPECULATIVE_TOKENS:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" || -n "${SPECULATIVE_KV_CACHE_DTYPE:-}" || -n "${SPECULATIVE_DRAFT_SAMPLE_METHOD:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH || config_key_has_explicit_value SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION; then
       echo "ERROR: speculative fields were set but SPECULATIVE_METHOD is missing." >&2
       echo "       Use SPECULATIVE_METHOD=mtp|dflash or provide SPECULATIVE_CONFIG." >&2
+      return 1
+    fi
+    return 0
+  fi
+
+  if [[ "$method" == "none" ]]; then
+    if [[ "$tokens" != "0" ]]; then
+      echo "ERROR: SPECULATIVE_METHOD=none requires SPECULATIVE_TOKENS=0." >&2
       return 1
     fi
     return 0
@@ -4335,9 +4341,9 @@ validate_speculative_route() {
   fi
 
   if [[ "$method" == "mtp" ]]; then
-    if [[ -n "${SPECULATIVE_MODEL:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" || -n "${SPECULATIVE_KV_CACHE_DTYPE:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH; then
+    if [[ -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" || -n "${SPECULATIVE_KV_CACHE_DTYPE:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH; then
       echo "ERROR: MTP launcher shortcut must not set DFlash-only speculative fields." >&2
-      echo "       Clear SPECULATIVE_MODEL / draft-* fields or switch SPECULATIVE_METHOD=dflash." >&2
+      echo "       Clear draft-* fields or switch SPECULATIVE_METHOD=dflash." >&2
       return 1
     fi
   fi
@@ -4369,6 +4375,61 @@ validate_speculative_route() {
   if [[ -n "$backend" ]]; then
     set_derived_default SPECULATIVE_ATTENTION_BACKEND "$backend"
   fi
+}
+
+apply_speculative_runtime_defaults() {
+  local method tokens
+
+  method=$(effective_speculative_method)
+  case "$method" in
+    none|"")
+      set_derived_default SPECULATIVE_METHOD none
+      set_derived_default SPECULATIVE_TOKENS 0
+      if ! config_key_has_explicit_value MTP_K; then
+        MTP_K=0
+        export MTP_K
+      fi
+      ;;
+    mtp)
+      tokens=$(effective_speculative_tokens)
+      [[ "$tokens" =~ ^[1-9][0-9]*$ ]] || tokens=3
+      set_derived_default SPECULATIVE_TOKENS "$tokens"
+      if ! config_key_has_explicit_value MTP_K; then
+        MTP_K=$tokens
+        export MTP_K
+      fi
+      ;;
+    dflash)
+      tokens=$(effective_speculative_tokens)
+      [[ "$tokens" =~ ^[1-9][0-9]*$ ]] || tokens=7
+      set_derived_default SPECULATIVE_TOKENS "$tokens"
+      if ! config_key_has_explicit_value MTP_K; then
+        MTP_K=0
+        export MTP_K
+      fi
+      set_derived_default VLLM_KV_CACHE_LAYOUT BLHNC
+      set_derived_default SPECULATIVE_ATTENTION_BACKEND TRITON_ATTN
+      set_derived_default SPECULATIVE_KV_CACHE_DTYPE float16
+      set_derived_default PER_REQUEST_SPEC_DECODE_METRICS detailed
+      if [[ "${MAX_NUM_SEQS:-1}" =~ ^[1-9][0-9]*$ ]] && (( MAX_NUM_SEQS > 1 )); then
+        if [[ "${TP_SIZE:-1}" =~ ^[1-9][0-9]*$ ]] && (( TP_SIZE >= 4 )); then
+          set_derived_default LONG_PREFILL_TOKEN_THRESHOLD 512
+        else
+          set_derived_default LONG_PREFILL_TOKEN_THRESHOLD 2560
+        fi
+      fi
+      ;;
+  esac
+}
+
+validate_spec_decode_metrics() {
+  case "${PER_REQUEST_SPEC_DECODE_METRICS:-none}" in
+    none|summary|detailed) ;;
+    *)
+      echo "ERROR: PER_REQUEST_SPEC_DECODE_METRICS must be none, summary, or detailed." >&2
+      return 1
+      ;;
+  esac
 }
 
 validate_mode_kv_policy() {
@@ -4622,6 +4683,10 @@ build_args() {
   local spec_method spec_tokens capture_sizes capture_max generated_speculative_config
   spec_method=$(effective_speculative_method)
   spec_tokens=$(effective_speculative_tokens)
+  if [[ "$spec_tokens" =~ ^[0-9]+$ ]] && (( spec_tokens > 0 )) && \
+     [[ -n "${PER_REQUEST_SPEC_DECODE_METRICS:-}" && "${PER_REQUEST_SPEC_DECODE_METRICS:-}" != "none" ]]; then
+    VLLM_ARGS+=(--per-request-spec-decode-metrics "$PER_REQUEST_SPEC_DECODE_METRICS")
+  fi
   if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
     VLLM_ARGS+=(--speculative-config "$SPECULATIVE_CONFIG")
   elif [[ -n "$spec_method" && "$spec_tokens" =~ ^[0-9]+$ ]] && (( spec_tokens > 0 )); then
@@ -5633,6 +5698,7 @@ prepare_runtime_defaults() {
   normalize_mode
   SERVICE_SCOPE=${SERVICE_SCOPE:-local}
   normalize_message_type_defaults
+  apply_speculative_runtime_defaults
   apply_prefix_cache_defaults
   ENABLE_AUTO_TOOL_CHOICE=$(normalize_bool "${ENABLE_AUTO_TOOL_CHOICE:-0}")
   apply_family_reasoning_defaults
@@ -5645,6 +5711,7 @@ prepare_runtime_defaults() {
     fi
   fi
   validate_mode_kv_policy
+  validate_spec_decode_metrics
   validate_speculative_route || return 1
 }
 
@@ -5668,6 +5735,7 @@ Launch summary:
   Fork release:         v$VERSION
   Runtime identity:     $RUNTIME_IDENTITY
   Model directory:      $MODEL_DIR
+  Draft model:          ${SPECULATIVE_MODEL:-not selected}
   Served name:          $SERVED_NAME
   Model architecture:   $MODEL_FAMILY
   vLLM --quantization:  ${QUANTIZATION:-auto}
@@ -5688,6 +5756,7 @@ Launch summary:
   Prefill batch barrier: ${PREFILL_BATCH_BARRIER:-0} (automatic for max sequences > 1)
   CUDA graph captures:  $(current_cudagraph_capture_label)
   Spec decode:          $(current_speculative_label)
+  Spec metrics:         ${PER_REQUEST_SPEC_DECODE_METRICS:-none}
   DFlash draft fetch:   $(current_dflash_download_route_label)
   Message type:         $message_type
   Chat template:        $(current_template_label)
@@ -5767,7 +5836,7 @@ main_menu_item_text() {
   local gpu_devices tp_size pp_size
 
   case "$idx" in
-    1) printf '1. Weight directory: %s' "$(menu_value "${MODEL_DIR:-}")" ;;
+    1) printf '1. Target model:     %s' "$(menu_value "${MODEL_DIR:-}")" ;;
     2) printf '2. Profile:          %s' "$(current_profile_label)" ;;
     3)
       gpu_devices=${GPU_DEVICES:-$(detect_default_gpu_devices)}
@@ -5849,6 +5918,8 @@ render_main_menu() {
   declare -gA MAIN_MENU_ITEM_LINES=()
   MAIN_MENU_RENDERED_LINES=0
   render_main_menu_item 1 "$current" "$(main_menu_item_text 1)"
+  printf '     Draft model:      %s\n' "$(menu_value "${SPECULATIVE_MODEL:-}")"
+  MAIN_MENU_RENDERED_LINES=$((MAIN_MENU_RENDERED_LINES + 1))
   render_main_menu_item 2 "$current" "$(main_menu_item_text 2)"
   printf '     Model architecture: %s\n' "$(menu_value "${MODEL_FAMILY:-}")"
   MAIN_MENU_RENDERED_LINES=$((MAIN_MENU_RENDERED_LINES + 1))
