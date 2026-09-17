@@ -757,6 +757,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
+        self.kv_cache_num_blocks = [
+            self.kv_cache_config.num_blocks_of(
+                next(
+                    tensor
+                    for tensor in self.kv_cache_config.kv_cache_tensors
+                    if layer_name in tensor.layers
+                )
+            )
+            for layer_name, cache in kv_caches_dict.items()
+            if cache.device == self.device
+        ]
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
@@ -1210,7 +1221,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if scheduler_output.kv_cache_block_copies:
             copy_kv_cache_blocks_inplace(
                 self.kv_caches,
-                self.kv_cache_config.num_blocks,
+                self.kv_cache_num_blocks,
                 scheduler_output.kv_cache_block_copies,
             )
 

@@ -93,6 +93,7 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model,
     is_text_generation_model,
 )
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -1252,7 +1253,7 @@ class GPUModelRunner(
         if scheduler_output.kv_cache_block_copies:
             copy_kv_cache_blocks_inplace(
                 self.kv_caches,
-                self.kv_cache_config.num_blocks,
+                self.kv_cache_num_blocks,
                 scheduler_output.kv_cache_block_copies,
             )
 
@@ -7424,6 +7425,19 @@ class GPUModelRunner(
         num_attn_module = (
             2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
         )
+        self.kv_cache_num_blocks = [
+            kv_cache_config.num_blocks_of(
+                next(
+                    tensor
+                    for tensor in kv_cache_config.kv_cache_tensors
+                    if layer_name in tensor.layers
+                )
+            )
+            for layer_name in sorted(
+                kv_caches,
+                key=lambda name: extract_layer_index(name, num_attn_module),
+            )
+        ]
         bind_kv_cache(
             kv_caches,
             self.compilation_config.static_forward_context,
