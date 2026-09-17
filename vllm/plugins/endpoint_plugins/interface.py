@@ -16,8 +16,8 @@ a custom stat, etc.) pair this entry point with one registered under
 loaded independently where neither implies the other.
 
 Plugins are opt-in. See `load_endpoint_plugins` in `vllm/plugins/__init__.py`
-for the loading/gating rules and `docs/usage/security.md` for the security
-posture of exposing plugin defined routes.
+for the loading/gating rules and `SECURITY.md` for the security posture of
+exposing plugin defined routes.
 
 The CPU only render server (see `build_and_serve_renderer` in
 `vllm/entrypoints/launchers/render`) has no `EngineClient`. A plugin

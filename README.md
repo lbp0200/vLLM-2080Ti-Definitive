@@ -1,9 +1,12 @@
 <!-- markdownlint-disable MD001 MD041 -->
-# vLLM 2080 Ti Definitive Edition
+# ⚡ vLLM 2080 Ti Definitive Edition
 
-![vLLM 2080 Ti Definitive Edition cover](docs/assets/vllm-2080ti-cover.jpg)
+![vLLM 2080 Ti Definitive Edition cover](docs/assets/vllm-2080ti-definitive-title.jpeg)
 
-The definitive vLLM runtime for dual RTX 2080 Ti and multi-GPU Tesla T10 serving.
+Language: English | [简体中文](README.zh-CN.md)
+
+The definitive vLLM inference runtime for dual RTX 2080 Ti and other SM75 GPUs,
+including Tesla T10/T40/T4, TITAN RTX, and Quadro RTX 6000/8000.
 
 This hardware-focused fork preserves the SM75-specific source changes, launcher
 profiles, and validation evidence needed to reproduce these Turing inference
@@ -11,9 +14,10 @@ stacks. It is
 based on upstream vLLM; retain both the upstream license and attribution to
 `github.com/weicj` when redistributing a derivative.
 
-Language: English | [简体中文](README.zh-CN.md)
+For usage feedback, feature requests, and community discussion, join the
+[Discord community](https://discord.gg/VFqVVySdMS).
 
-![Live single-request throughput demo](docs/assets/vllmspeed.gif)
+![Live single-request throughput demo](docs/assets/vllmspeed_dflash.gif)
 
 Current 0.2.x baseline: `v0.2.1-pre4`
 Upstream baseline: `b23433088b` (`v0.29.1rc0-33`)
@@ -22,7 +26,7 @@ Branch: [`vllm-2080ti-definitive-0.2.x`](https://github.com/weicj/vLLM-2080Ti-De
 Release reference: [v0.2.1-pre4](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.1-pre4)
 Release history: [CHANGELOG.md](CHANGELOG.md)
 
-## Why RTX 2080 Ti For LLM Inference?
+## 💡 Why RTX 2080 Ti For LLM Inference?
 
 The project is built around a practical cost/performance premise: two 22 GB
 RTX 2080 Ti cards joined by NVLink provide 44 GB of VRAM, substantial memory
@@ -31,49 +35,49 @@ for serious local 27B and 35B-class serving rather than only small-model use.
 
 | Metric | 2x RTX 2080 Ti 22 GB + NVLink | RTX 3090 Ti 24 GB baseline | Ratio |
 | --- | ---: | ---: | ---: |
-| Physical CUDA cores | 8,704 | 5,376 | 1.62x |
+| Dedicated FP32 datapaths | 8,704 | 5,376 | 1.62x |
 | SM count | 136 | 84 | 1.62x |
-| Physical Tensor Cores | 1,088 | 336 | 3.24x |
+| Tensor Cores | 1,088 | 336 | 3.24x |
 | Dense FP16 matrix throughput | 228 TFLOPS | 160 TFLOPS | 1.43x |
 | Total memory bandwidth | 1,232 GB/s | 1,008 GB/s | 1.22x |
 | Total VRAM | 44 GB | 24 GB | 1.83x |
 
 The fork turns those hardware properties into a usable serving stack through
-Marlin, FlashInfer/FlashQLA, TurboQuant/INT8 KV, MTP, and CUDA Graph support.
+Marlin, FlashInfer/FlashQLA, TurboQuant/INT8 KV, MTP/DFlash2, and CUDA Graph support.
 
 The second supported hardware family is four 16 GiB Tesla T10 GPUs over PCIe.
 Those profiles target TP=4 Qwen 27B serving, including 256K-context text and
-image routes. They use the ABI-matched PCIe custom all-reduce extension and are
-documented in the [T10 Profile Guide](profiles/4xT10/README.md).
+image routes with the ABI-matched PCIe custom all-reduce extension.
 
-## Support Status
+## 🧩 Support Status
 
-The `0.2.x` target is Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15, CUDA 13.0, and PyTorch 2.13. The maintained `0.1.x` line remains the compatibility route for CUDA 12.8, PyTorch 2.11, older kernels, and GCC 12/13/14.
+The current target environment is Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15, CUDA 13.0, and PyTorch 2.13. For CUDA 12.8, PyTorch 2.11, older kernels, or GCC 12/13/14, refer to the `0.1.x` line, which is no longer actively maintained.
 
-The dual-2080-Ti CUDA Graph validation and its measurement methodology are
-documented in [the validation report](docs/2080ti-0.2.1-pre-validation.md).
-The report defines the supported host selection rule, build requirements,
-correctness checks, and benchmark method. Model routes are supported only when
-their corresponding profile documentation includes completed validation.
+Supported model routes and their measurements are listed in the corresponding
+hardware profile guides.
 
-The launcher supports selecting tensor parallelism (`TP_SIZE`) and pipeline
-parallelism (`PP_SIZE`), including mixed TP/PP inference layouts when the
-visible GPU count matches the requested topology. The primary supported layouts
-are dual RTX 2080 Ti with TP=2 and four Tesla T10 GPUs with TP=4. Other layouts
-are available for engineering tests and require separate validation.
+The launcher supports TP, PP, and mixed TP/PP inference; the primary layouts are two RTX 2080 Ti GPUs with TP=2 and four Tesla T10 GPUs with TP=4.
 
-## Tested Model Checkpoints
+## 🧪 Tested Model Checkpoints
 
-Current model and weight routes. Individual serving presets and measurements
-are listed in the [Profile Guide](profiles/README.md).
+Current tested model and weight routes:
 
-| Model route | Weight route | Model card | Recommended use |
-| --- | --- | --- | --- |
-| Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | High-precision single-request inference |
-| Qwen3.8 27B | NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | Long-context concurrent inference |
-| Qwen3.x 35B | FP8 | [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8) | Fast personal inference |
+| Model route | Weight route | Model card | Recommended use | Profile path |
+| --- | --- | --- | --- | --- |
+| Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | High-precision single-request inference | `qwen27b/w8a16` |
+| Qwen3.8 27B | NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | Long-context concurrent inference | `qwen27b/w4a16` |
+| Qwen3.x 35B | FP8 | [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8) | Fast personal inference | `qwen35b/w8a16` |
 
-## Build And Launch
+## ⚡ Highlights
+
+| Hardware | Weight | Context / KV | 4K/128 prefill / decode | 32K/512 prefill / decode |
+| --- | --- | --- | ---: | ---: |
+| 2x RTX 2080 Ti | Qwen3.8 27B NVFP4 | 256K / FP16 | **1465.02 / 220.69 tok/s** | **1280.57 / 213.66 tok/s** |
+| 4x Tesla T10 | Qwen3.8 27B FP8 | 256K / FP16 | **1444.73 / 190.78 tok/s** | **1456.77 / 188.94 tok/s** |
+
+Both are single-request results using DFlash2 (default K=7) with high-speculative-acceptance synthetic inputs. Real-task throughput depends on the draft acceptance rate and may not reach the figures above.
+
+## 🚀 Build And Launch
 
 ```bash
 git clone https://github.com/weicj/vLLM-2080Ti-Definitive.git
@@ -81,22 +85,32 @@ cd vLLM-2080Ti-Definitive
 ./build.sh
 ```
 
+Run `./launcher.sh` to configure and manage a service interactively. It can
+select the checkpoint and profile, configure GPU and TP/PP topology, choose the
+launch mode and network settings, start the service with health and smoke
+checks, and stop a running service.
+
+![launcher.sh interactive main menu](docs/assets/launcher-main-menu.png)
+
+For automated deployment, pass the configuration non-interactively:
+
 ```bash
 MODEL_DIR=/path/to/checkpoint \
-PROFILE=2x2080Ti/qwen27b/w8a16/fast/mtp-tqk8v4-1x256k-text-only.env \
-MODE=fast GPU_DEVICES=4,5 TP_SIZE=2 \
+PROFILE=2x2080Ti/qwen27b/w8a16/normal/mtp-fp8kv-1x256k-text-only.env \
+MODE=normal GPU_DEVICES=4,5 TP_SIZE=2 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
 
-Use `./launcher.sh` for interactive setup or `./launcher.sh --print-config` to
-preview a route. See the [Profile Guide](profiles/README.md) for available
-profiles.
+Use `./launcher.sh --print-config` to preview a route. Available profiles are
+listed for [2x2080Ti](profiles/2x2080Ti/README.md) and
+[4xT10](profiles/4xT10/README.md). See the
+[non-interactive launch guide](docs/non-interactive-launch.md) for automation.
 
-## Profiles
+## 🧭 Profiles
 
-Start with [the Profile Guide](profiles/README.md). Profiles use the layout
-`profiles/<hardware>/<model>/<weight>/<mode>/<route>.env`; for example,
-`2x2080Ti/qwen27b/w8a16/normal/mtp-fp16kv-1x128k-text-only.env`,
+Profiles use the layout `profiles/<hardware>/<model>/<weight>/<mode>/<route>.env`;
+for example,
+`2x2080Ti/qwen27b/w8a16/normal/mtp-fp8kv-1x256k-text-only.env`,
 `2x2080Ti/qwen35b/w8a16/normal/nomtp-fp16kv-1x256k-text-only.env`, and
 `4xT10/qwen27b/w8a16/normal/mtp-fp16kv-1x256k-text-image.env`.
 
@@ -110,19 +124,7 @@ Available modes:
 The profile selects only route parameters. The launcher owns GPU selection,
 port, model path, chat template, and reasoning defaults.
 
-## MTP And KV Precision
-
-Use a shipped profile before hand-tuning MTP and KV settings. Choose KV by
-intent: FP16/default KV for output quality, INT8 KV for balanced long-context
-service, and TurboQuant K8V4 for compressed fast routes. MTP gains depend on
-acceptance rate, so a synthetic peak must be checked against real output and
-the profile's quality probe.
-
-For the current migration, use the exact method and measurements in
-[the validation report](docs/2080ti-0.2.1-pre-validation.md), especially for
-TurboQuant and MTP3. 
-
-## Hardware Target
+## 🛠️ Hardware Target
 
 - Two RTX 2080 Ti 22 GB GPUs connected by NVLink
 - NVIDIA Turing / SM75, tensor parallel size 2
@@ -132,7 +134,7 @@ TurboQuant and MTP3.
 Other Turing cards need independent validation for VRAM capacity, PCIe/NVLink
 topology, model head dimensions, KV-cache dtype, and CUDA Graph behavior.
 
-## Hardware Q&A
+## ❓ Hardware Q&A
 
 **What GPU interconnect is required?**
 
@@ -157,9 +159,9 @@ confirmed PCIe P2P and a separate profile validation.
 
 **Which CUDA and PyTorch versions apply?**
 
-The `0.2.x` target is CUDA 13.0 with PyTorch 2.13. The older CUDA 12.8 /
-PyTorch 2.11 stack remains a separate `v0.1.x` compatibility line. Keep the
-PyTorch CUDA build, toolkit, FlashInfer/FlashQLA build, and selected profile
+The `0.2.x` target is CUDA 13.0 with PyTorch 2.13. For the older CUDA 12.8 /
+PyTorch 2.11 stack, refer to the unmaintained `v0.1.x` compatibility line. Keep
+the PyTorch CUDA build, toolkit, FlashInfer/FlashQLA build, and selected profile
 aligned; they are not interchangeable runtime combinations.
 
 **What other hardware risks matter?**
@@ -168,13 +170,13 @@ Cooling, stable power delivery, and enough SSD capacity for weights and compile
 caches. Thermal throttling can look like a software performance regression,
 particularly during long prefill and repeated CUDA Graph/AOT compilation.
 
-## Related Project
+## 🔗 Related Project
 
 - [2080Ti-LLM-Toolbox](https://github.com/weicj/2080Ti-LLM-Toolbox): companion
   toolbox for dual-2080-Ti model routes, benchmark summaries, model notes, and
   operational guidance. This repository focuses on the patched vLLM runtime.
 
-## Credits And Upstream Projects
+## 🙏 Credits And Upstream Projects
 
 This repository is a hardware-focused fork of
 [vLLM](https://github.com/vllm-project/vllm), licensed under Apache-2.0. It

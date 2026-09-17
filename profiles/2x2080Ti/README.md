@@ -11,8 +11,7 @@ Validated DFlash2 routes:
 | `qwen27b/w4a16/fast/dflash2-tqk8v4-2x172k-text-only.env` | fast | TQK8V4 | 2 x 172K | text-only |
 | `qwen27b/w4a16/fast/dflash2-tqk8v4-1x256k-text-image.env` | fast | TQK8V4 | 1 x 256K | text+image |
 
-Other measured routes remain under their model/weight directories. The DFlash2
-SM75 evidence is in [the validation document](../../docs/0.2.1-pre4-dflash2-sm75-validation.md).
+Other measured routes remain under their model/weight directories.
 
 ## Qwen3.8-27B-FP8
 

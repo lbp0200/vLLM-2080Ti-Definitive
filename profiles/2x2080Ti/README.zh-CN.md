@@ -11,7 +11,7 @@
 | `qwen27b/w4a16/fast/dflash2-tqk8v4-2x172k-text-only.env` | fast | TQK8V4 | 2 x 172K | text-only |
 | `qwen27b/w4a16/fast/dflash2-tqk8v4-1x256k-text-image.env` | fast | TQK8V4 | 1 x 256K | text+image |
 
-其他路线仍按模型和权重目录保存。DFlash2 SM75 证据见[验证文档](../../docs/0.2.1-pre4-dflash2-sm75-validation.md)。
+其他路线仍按模型和权重目录保存。
 
 ## Qwen3.8-27B-FP8
 
