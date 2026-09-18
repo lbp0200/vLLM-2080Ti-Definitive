@@ -623,13 +623,19 @@ class Scheduler(SchedulerInterface):
                 for request in self.running
                 if request.num_computed_tokens < request.num_prompt_tokens
             ]
+            # A newly arriving prefill must not pause an already decoding-only
+            # batch. The barrier is for aligning an in-flight prefill cohort;
+            # when no running request is still prefilling, admit the waiting
+            # request alongside decode work so the second request does not
+            # create an avoidable full-step stall.
+            barrier_has_running_prefill = bool(prefill_candidates)
             available_slots = max(
                 self.max_num_running_reqs
                 - len(self.running)
                 - self.num_waiting_for_streaming_input,
                 0,
             )
-            if available_slots:
+            if available_slots and barrier_has_running_prefill:
                 waiting_candidates = (
                     request
                     for request in self.waiting
@@ -643,7 +649,7 @@ class Scheduler(SchedulerInterface):
                 request.num_prompt_tokens - request.num_computed_tokens
                 for request in prefill_candidates
             ]
-            if remaining_prompts:
+            if remaining_prompts and barrier_has_running_prefill:
                 prefill_frontier = max(remaining_prompts)
                 next_frontier = max(
                     (r for r in remaining_prompts if r < prefill_frontier),
