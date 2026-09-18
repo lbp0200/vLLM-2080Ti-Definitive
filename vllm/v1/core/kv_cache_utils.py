@@ -2309,6 +2309,38 @@ def _annotate_eagle_groups(
     if spec_config is None or not spec_config.use_eagle_block_drop():
         return
 
+    # Qwen3/3.5 MTP registers its predictor attention under the explicit
+    # ``mtp.layers`` prefix.  Those layers use the same causal attention spec
+    # as the target, so the generic spec marker is unavailable.  Mark only the
+    # predictor groups; falling back to every group would mark aligned Mamba
+    # state as volatile and disable all prefix reuse.
+    if spec_config.method == "mtp":
+        draft_config = getattr(spec_config, "draft_model_config", None)
+        architectures = getattr(draft_config, "architectures", ()) or ()
+        qwen_mtp = any(
+            arch in {"Qwen3NextMTP", "Qwen3_5MTP", "Qwen3_5MoeMTP"}
+            for arch in architectures
+        )
+        if qwen_mtp:
+            for group in kv_cache_groups:
+                if any(
+                    name.startswith("mtp.layers.") or ".mtp.layers." in name
+                    for name in group.layer_names
+                ):
+                    group.is_eagle_group = True
+            # Qwen3.5's predictor can be packed into the target full-attention
+            # group, so its layer name is not always visible after grouping.
+            # In that case every non-Mamba group contains the causal target /
+            # predictor attention and must share the EAGLE drop; aligned Mamba
+            # state must remain reusable.
+            if not any(group.is_eagle_group for group in kv_cache_groups):
+                for group in kv_cache_groups:
+                    if not any(
+                        isinstance(spec, MambaSpec)
+                        for spec in iter_layer_specs(group.kv_cache_spec)
+                    ):
+                        group.is_eagle_group = True
+
     for group in kv_cache_groups:
         if any(
             getattr(spec, "non_causal_multi_token_decode", False)

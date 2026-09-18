@@ -3042,9 +3042,53 @@ def test_dflash2_aligned_hybrid_uses_independent_block_pools():
         "DFlashDraftModel"
     ]
     assert not kv_cache_utils._uses_native_dflash2(config)
-
     config.speculative_config.use_dflash = lambda: False
     assert not kv_cache_utils._uses_native_dflash2(config)
+
+
+def test_qwen_mtp_marks_only_predictor_groups_for_prefix_cache():
+    config = _spec_decode_grouping_config(method="mtp", model_type="qwen3_next")
+    config.speculative_config.use_dflash = lambda: False
+    config.speculative_config.draft_model_config = SimpleNamespace(
+        architectures=["Qwen3NextMTP"]
+    )
+    specs = {
+        "model.layers.0.linear_attn": new_mamba_spec(
+            block_size=32, mamba_cache_mode="align"
+        ),
+        "mtp.layers.0.self_attn": FullAttentionSpec(
+            block_size=32, num_kv_heads=1, head_size=1, dtype=torch.float16
+        ),
+    }
+
+    groups = get_kv_cache_groups(config, specs)
+
+    assert [group.is_eagle_group for group in groups] == [False, True]
+
+    config.speculative_config.draft_model_config = SimpleNamespace(
+        architectures=["Qwen3_5MTP"]
+    )
+    packed_specs = {
+        "model.layers.0.linear_attn": new_mamba_spec(
+            block_size=32, mamba_cache_mode="align"
+        ),
+        "model.layers.1.self_attn": FullAttentionSpec(
+            block_size=32, num_kv_heads=1, head_size=1, dtype=torch.float16
+        ),
+        "model.layers.2.mtp_self_attn": FullAttentionSpec(
+            block_size=32, num_kv_heads=1, head_size=1, dtype=torch.float16
+        ),
+    }
+    packed_groups = get_kv_cache_groups(config, packed_specs)
+    assert any(group.is_eagle_group for group in packed_groups)
+    assert not any(
+        group.is_eagle_group
+        and any(
+            isinstance(spec, MambaSpec)
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        )
+        for group in packed_groups
+    )
 
 
 def test_dflash2_identity_falls_back_to_checkpoint_name():

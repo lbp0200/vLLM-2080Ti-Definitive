@@ -609,27 +609,6 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         return blocks, 0, 0
 
 
-class IsolatedKVCacheCoordinator(KVCacheCoordinator):
-    """Coordinator for DFlash2's isolated cache block-ID namespaces.
-
-    DFlash2 speculative KV needs separate physical pages per target/draft
-    group. Prefix lookup remains disabled for this layout until its draft
-    lookahead semantics can be retained across independent groups.
-    """
-
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
-        del running_request_id
-        return [0] * len(self.single_type_managers)
-
-    def find_longest_cache_hit(
-        self,
-        block_hashes: list[BlockHash],
-        max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
-        del block_hashes, max_cache_hit_length
-        return tuple([] for _ in self.single_type_managers), 0, 0
-
-
 class UnitaryKVCacheCoordinator(KVCacheCoordinator):
     """
     KV cache coordinator for models with only one KV cache group. This is the
@@ -714,6 +693,62 @@ class SpecGroup(NamedTuple):
     group_ids: list[int]
     manager_cls: type[SingleTypeKVCacheManager]
     use_eagle: bool
+
+
+class IsolatedKVCacheCoordinator(KVCacheCoordinator):
+    """Reuse target KV while rebuilding independent draft KV state.
+
+    Target and draft pages have separate block-ID namespaces and different
+    speculative lookahead lifetimes.  Treating them as a normal hybrid cache
+    can make a repeated request wait indefinitely after the first cache fill.
+    Only target groups participate in lookup. Draft groups start empty and the
+    DFlash speculator masks cache-restored target tokens out of draft attention.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.target_group_ids = [
+            group_id
+            for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups)
+            if not group.is_eagle_group
+        ]
+
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
+        del running_request_id
+        return [0] * len(self.single_type_managers)
+
+    def find_longest_cache_hit(
+        self,
+        block_hashes: list[BlockHash],
+        max_cache_hit_length: int,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
+        hit_blocks: list[list[KVCacheBlock]] = [
+            [] for _ in self.single_type_managers
+        ]
+        hit_length = max_cache_hit_length
+        for group_id in self.target_group_ids:
+            group = self.kv_cache_config.kv_cache_groups[group_id]
+            manager = self.single_type_managers[group_id]
+            blocks, group_hit = type(manager).find_longest_cache_hit(
+                block_hashes=block_hashes,
+                max_length=hit_length,
+                kv_cache_group_ids=[group_id],
+                block_pool=manager.block_pool,
+                kv_cache_spec=group.kv_cache_spec,
+                drop_eagle_block=False,
+                alignment_tokens=self.scheduler_block_size,
+                dcp_world_size=manager.dcp_world_size,
+                pcp_world_size=manager.pcp_world_size,
+            )
+            hit_length = min(hit_length, group_hit)
+            hit_blocks[group_id] = blocks[0]
+
+        if not self.target_group_ids:
+            hit_length = 0
+        for group_id in self.target_group_ids:
+            manager = self.single_type_managers[group_id]
+            del hit_blocks[group_id][cdiv(hit_length, manager.block_size) :]
+        return tuple(hit_blocks), hit_length, 0
 
 
 class HybridKVCacheCoordinator(KVCacheCoordinator):
