@@ -179,6 +179,45 @@ def test_mamba_retirement_bounds_prefill_states(block_size, in_flight_chunks):
     assert pool.get_num_free_blocks() == initial_free
 
 
+def test_mamba_align_retires_replaced_state_at_block_boundary():
+    """Aligned Mamba state replacement must not retain an old page forever."""
+    block_size = 1648
+    num_speculative_blocks = 7
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=num_speculative_blocks,
+    )
+    pool = BlockPool(
+        num_gpu_blocks=2 + num_speculative_blocks + 1,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+
+    for target_tokens in range(block_size, 20 * block_size + 1, block_size):
+        processed_tokens = max(0, target_tokens - block_size)
+        manager.remove_skipped_blocks("dflash", processed_tokens)
+        required = manager.get_num_blocks_to_allocate(
+            "dflash", target_tokens + num_speculative_blocks, [],
+            processed_tokens, processed_tokens, target_tokens
+        )
+        assert required <= pool.get_num_free_blocks()
+        manager.allocate_new_blocks(
+            "dflash", target_tokens + num_speculative_blocks, target_tokens
+        )
+
+    assert pool.get_num_free_blocks() == 0
+
+
 def get_sliding_window_manager(
     sliding_window_spec,
     block_pool,
