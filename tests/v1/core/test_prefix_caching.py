@@ -160,6 +160,56 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
     )
 
 
+def test_independent_dflash_pools_support_common_prefix_hits():
+    """Independent target/draft pools still reconcile a shared cache hit."""
+    block_size = 8
+    config = KVCacheConfig(
+        num_blocks=100,
+        num_blocks_per_group=(100, 100),
+        independent_block_pools=True,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["target"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["draft"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                    sliding_window=64,
+                ),
+                is_eagle_group=True,
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=1024,
+        enable_caching=True,
+        use_eagle=True,
+        num_prefill_lookahead=1,
+        hash_block_size=block_size,
+    )
+    prompt = [i for i in range(12) for _ in range(block_size)]
+    first = make_request("first", prompt, block_size, sha256)
+    computed, _, _ = manager.get_computed_blocks(first)
+    assert manager.allocate_slots(first, len(prompt), 0, computed) is not None
+    manager.free(first)
+
+    second = make_request("second", prompt + [999], block_size, sha256)
+    _, hit_tokens, _ = manager.get_computed_blocks(second)
+    assert hit_tokens > 0
+
+
 HISPARSE_BLOCK_SIZE = 16
 
 

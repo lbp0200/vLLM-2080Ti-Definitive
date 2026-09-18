@@ -609,27 +609,6 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         return blocks, 0, 0
 
 
-class IsolatedKVCacheCoordinator(KVCacheCoordinator):
-    """Coordinator for DFlash2's isolated cache block-ID namespaces.
-
-    DFlash2 speculative KV needs separate physical pages per target/draft
-    group. Prefix lookup remains disabled for this layout until its draft
-    lookahead semantics can be retained across independent groups.
-    """
-
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
-        del running_request_id
-        return [0] * len(self.single_type_managers)
-
-    def find_longest_cache_hit(
-        self,
-        block_hashes: list[BlockHash],
-        max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
-        del block_hashes, max_cache_hit_length
-        return tuple([] for _ in self.single_type_managers), 0, 0
-
-
 class UnitaryKVCacheCoordinator(KVCacheCoordinator):
     """
     KV cache coordinator for models with only one KV cache group. This is the
@@ -1130,13 +1109,12 @@ def get_kv_cache_coordinator(
     num_prefill_lookahead: int = 0,
     allow_partial_hash_hits: bool = True,
 ) -> KVCacheCoordinator:
-    if kv_cache_config.independent_block_pools:
-        return IsolatedKVCacheCoordinator(
+    if kv_cache_config.independent_block_pools and not enable_caching:
+        return KVCacheCoordinatorNoPrefixCache(
             kv_cache_config,
             max_model_len,
             max_in_flight_tokens,
             use_eagle,
-            enable_caching,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
