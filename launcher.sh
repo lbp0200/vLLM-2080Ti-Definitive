@@ -3673,13 +3673,13 @@ show_launch_status() {
   case "${LAST_PERF_STATUS:-}" in
     completed)
       echo "  Performance reference:"
-      echo "    Lane:      ${LAST_PERF_LABEL:-uncached synthetic 4K/128, 3 sequential runs}"
+      echo "    Lane:      ${LAST_PERF_LABEL:-synthetic 4K/128, 3 sequential runs}"
       echo "    Prefill:   mean ${LAST_PERF_PREFILL_MEAN:-n/a} tok/s | median ${LAST_PERF_PREFILL_MEDIAN:-n/a} tok/s"
       echo "    Decode:    mean ${LAST_PERF_DECODE_MEAN:-n/a} tok/s | median ${LAST_PERF_DECODE_MEDIAN:-n/a} tok/s"
       echo "    Long 32K/512: prefill ${LAST_PERF_LONG_PREFILL:-n/a} tok/s | decode ${LAST_PERF_LONG_DECODE:-n/a} tok/s"
       ;;
     skipped_prefix_cache)
-      echo "  Performance reference: skipped (prefix caching is not explicitly disabled)"
+      echo "  Performance reference: skipped (legacy state; rerun the performance test)"
       ;;
     unavailable|failed)
       echo "  Performance reference: ${LAST_PERF_NOTE:-unavailable}"
@@ -3695,8 +3695,8 @@ show_startup_performance_report() {
   echo
   echo "Performance evaluation"
   echo
-  echo "  Reference lane: ${LAST_PERF_LABEL:-uncached synthetic 4K/128, 3 sequential runs}"
-  echo "  Prefix cache:   disabled (required for this reference measurement)"
+  echo "  Reference lane: ${LAST_PERF_LABEL:-synthetic 4K/128, 3 sequential runs}"
+  echo "  Prefix cache:   $(startup_performance_prefix_cache_label)"
   echo "  Samples:"
   IFS=';' read -r -a samples <<< "${LAST_PERF_SAMPLES:-}"
   for sample in "${samples[@]}"; do
@@ -3712,7 +3712,7 @@ show_startup_performance_report() {
   echo
   echo "  Synthetic reference only; it is neither a quality test nor a capacity proof."
   echo "  It does not change MAX_MODEL_LEN, GPU utilization, or KV-cache allocation."
-  echo "  Each completed request releases its temporary KV blocks before the next run."
+  echo "  Each completed request uses a unique synthetic prefix and releases its temporary KV blocks before the next run."
 }
 
 print_running_services() {
@@ -5067,12 +5067,8 @@ startup_performance_helper_path() {
 }
 
 startup_performance_eligibility_reason() {
-  local pid_file=${1:-} pid helper
+  local helper
 
-  if [[ "${DISABLE_PREFIX_CACHING:-0}" != "1" ]]; then
-    printf '%s\n' "skipped: prefix caching is not explicitly disabled; reference measurements require --no-enable-prefix-caching"
-    return 1
-  fi
   if ! [[ "${MAX_MODEL_LEN:-}" =~ ^[0-9]+$ ]] || (( MAX_MODEL_LEN < 4224 )); then
     printf '%s\n' "unavailable: MAX_MODEL_LEN must be at least 4224 for the fixed 4K/128 lane"
     return 1
@@ -5085,12 +5081,13 @@ startup_performance_eligibility_reason() {
     printf '%s\n' "unavailable: tools/profile_request.py was not found under RUNTIME_ROOT or the launcher root"
     return 1
   fi
-  if [[ -n "$pid_file" && -f "$pid_file" ]]; then
-    pid=$(cat "$pid_file" 2>/dev/null || true)
-    if pid_is_running "$pid" && ! pid_has_arg "$pid" --no-enable-prefix-caching; then
-      printf '%s\n' "unavailable: the running server was not started with --no-enable-prefix-caching"
-      return 1
-    fi
+}
+
+startup_performance_prefix_cache_label() {
+  if [[ "${DISABLE_PREFIX_CACHING:-0}" == "1" ]]; then
+    printf '%s\n' "prefix cache disabled"
+  else
+    printf '%s\n' "prefix cache enabled (unique benchmark prefixes)"
   fi
 }
 
@@ -5171,7 +5168,9 @@ run_startup_performance_test() {
   }
 
   echo
-  echo "Running uncached 4K/128 reference performance test (3 sequential requests)..."
+  local cache_label
+  cache_label=$(startup_performance_prefix_cache_label)
+  echo "Running 4K/128 performance test (3 sequential requests; ${cache_label})..."
   for run in 1 2 3; do
     printf '  Sample %d/3... ' "$run"
     if ! result=$("$RUNTIME_ROOT/.venv/bin/python" "$helper" \
@@ -5217,10 +5216,10 @@ run_startup_performance_test() {
     LAST_PERF_DECODE_MEAN LAST_PERF_DECODE_MEDIAN <<< "$statistics"
   LAST_PERF_STATUS=completed
   LAST_PERF_NOTE=""
-  LAST_PERF_LABEL="uncached synthetic 4K/128, 3 sequential runs"
+  LAST_PERF_LABEL="synthetic 4K/128, 3 sequential runs (${cache_label})"
   LAST_PERF_SAMPLES="${prefill_samples[0]},${decode_samples[0]};${prefill_samples[1]},${decode_samples[1]};${prefill_samples[2]},${decode_samples[2]}"
   echo
-  echo "Running uncached synthetic 32K/512 long-context performance test..."
+  echo "Running synthetic 32K/512 long-context performance test (${cache_label})..."
   if ! result=$("$RUNTIME_ROOT/.venv/bin/python" "$helper" \
       --model-dir "$MODEL_DIR" --served-name "$SERVED_NAME" \
       --base-url "http://${url_host}:${PORT}/v1" --endpoint completions \
@@ -5270,7 +5269,7 @@ maybe_run_startup_performance_test() {
   clear_startup_performance_state
   run_startup_performance_warmup "$url_host"
   while true; do
-    answer=$(read_line_with_esc "Run uncached 3x 4K/128 reference performance test now? [y/N]: ") || {
+    answer=$(read_line_with_esc "Run 3x 4K/128 + 1x 32K/512 performance test now? [y/N]: ") || {
       LAST_PERF_STATUS=not_requested
       return 0
     }
@@ -5289,19 +5288,10 @@ maybe_run_startup_performance_test() {
   done
 
   if ! reason=$(startup_performance_eligibility_reason "$pid_file"); then
-    if [[ "${DISABLE_PREFIX_CACHING:-0}" != "1" ]]; then
-      LAST_PERF_STATUS=skipped_prefix_cache
-      LAST_PERF_NOTE="$reason"
-      echo
-      echo "Reference performance test not run: prefix caching is not explicitly disabled."
-      echo "  Cached requests are not comparable with the uncached 4K/128 reference lane."
-      echo "  The current service is unchanged. Restart with Disable prefix caching = 1 to run it."
-    else
-      LAST_PERF_STATUS=unavailable
-      LAST_PERF_NOTE="$reason"
-      echo
-      echo "Reference performance test unavailable: $reason"
-    fi
+    LAST_PERF_STATUS=unavailable
+    LAST_PERF_NOTE="$reason"
+    echo
+    echo "Performance test unavailable: $reason"
     return 0
   fi
 
