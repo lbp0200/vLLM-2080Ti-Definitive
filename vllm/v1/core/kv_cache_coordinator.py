@@ -695,6 +695,29 @@ class SpecGroup(NamedTuple):
     use_eagle: bool
 
 
+class IsolatedKVCacheCoordinator(KVCacheCoordinator):
+    """Safely disable lookup for DFlash2's independent KV namespaces.
+
+    Target and draft pages have separate block-ID namespaces and different
+    speculative lookahead lifetimes.  Treating them as a normal hybrid cache
+    can make a repeated request wait indefinitely after the first cache fill.
+    Keep writes harmless but require a future coordinator that reconciles the
+    two lifetimes before enabling lookup.
+    """
+
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
+        del running_request_id
+        return [0] * len(self.single_type_managers)
+
+    def find_longest_cache_hit(
+        self,
+        block_hashes: list[BlockHash],
+        max_cache_hit_length: int,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
+        del block_hashes, max_cache_hit_length
+        return tuple([] for _ in self.single_type_managers), 0, 0
+
+
 class HybridKVCacheCoordinator(KVCacheCoordinator):
     """
     KV cache coordinator for hybrid models with multiple KV cache types, and
@@ -1109,12 +1132,13 @@ def get_kv_cache_coordinator(
     num_prefill_lookahead: int = 0,
     allow_partial_hash_hits: bool = True,
 ) -> KVCacheCoordinator:
-    if kv_cache_config.independent_block_pools and not enable_caching:
-        return KVCacheCoordinatorNoPrefixCache(
+    if kv_cache_config.independent_block_pools:
+        return IsolatedKVCacheCoordinator(
             kv_cache_config,
             max_model_len,
             max_in_flight_tokens,
             use_eagle,
+            enable_caching,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,

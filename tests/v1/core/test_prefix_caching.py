@@ -160,8 +160,8 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
     )
 
 
-def test_independent_dflash_pools_support_common_prefix_hits():
-    """Independent target/draft pools still reconcile a shared cache hit."""
+def test_independent_dflash_pools_keep_lookup_disabled_until_reconciled():
+    """DFlash independent pools must not expose an unsafe partial hit."""
     block_size = 8
     config = KVCacheConfig(
         num_blocks=100,
@@ -207,7 +207,7 @@ def test_independent_dflash_pools_support_common_prefix_hits():
 
     second = make_request("second", prompt + [999], block_size, sha256)
     _, hit_tokens, _ = manager.get_computed_blocks(second)
-    assert hit_tokens > 0
+    assert hit_tokens == 0
 
 
 HISPARSE_BLOCK_SIZE = 16
