@@ -17,11 +17,11 @@ profile 和验证资料。它基于上游 vLLM；再发布派生版本时必须�
 
 ![单请求实时测速演示](docs/assets/vllmspeed_dflash.gif)
 
-当前 0.2.x 基线：`v0.2.1-RC`
+当前 0.2.x 基线：`v0.2.1`
 上游基线：`b23433088b`（`v0.29.1rc0-33`）
 
 分支：[`vllm-2080ti-definitive-0.2.x`](https://github.com/weicj/vLLM-2080Ti-Definitive/tree/vllm-2080ti-definitive-0.2.x)
-版本参考：[v0.2.1-RC](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.1-RC)
+版本参考：[v0.2.1](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.1)
 版本记录：[CHANGELOG.md](CHANGELOG.md)
 
 ## 💡 为什么用 RTX 2080 Ti 做 LLM 推理？
@@ -43,8 +43,8 @@ profile 和验证资料。它基于上游 vLLM；再发布派生版本时必须�
 Graph，把这些硬件资源转成可用的 serving 栈。
 
 第二类主要目标硬件是四张通过 PCIe 连接的 16 GiB Tesla T10，面向 TP=4 的
-Qwen 27B 服务，包含 256K 上下文的文本和图文路线，并使用 ABI 匹配的 PCIe
-custom all-reduce 扩展。
+Qwen 27B 服务。18 条路线已经完成启动和参考负载审计；存在图像语义失败的路线
+会在硬件 README 中明确保留为 candidate。
 
 ## 🧩 支持状态
 
@@ -66,14 +66,16 @@ Launcher 支持 TP、PP 及 TP/PP 混合推理；当前主要布局为双 RTX 20
 
 ## ⚡ 性能亮点
 
-| 硬件 | 权重 | 上下文 / KV | 模式 / 消息 | 4K/128 prefill / decode | 32K/512 prefill / decode |
-| --- | --- | --- | --- | ---: | ---: |
-| 2x RTX 2080 Ti | Qwen3.8 27B NVFP4 | 256K / FP8 | fast / text+image | **1440.77 / 222.12 tok/s** | **1285.16 / 209.80 tok/s** |
-| 4x Tesla T10 | Qwen3.8 27B FP8 | 256K / FP16 | fast / text-only | **1444.73 / 190.78 tok/s** | **1456.77 / 188.94 tok/s** |
+| 硬件 | 权重 | 上下文 / KV | 4K 输入解码 | 32K 输入解码 |
+| --- | --- | --- | ---: | ---: |
+| 2x RTX 2080 Ti | Qwen3.8 27B NVFP4 | 256K / FP8 KV | **220.84 tok/s** | **209.35 tok/s** |
+| 4x Tesla T10 | Qwen3.8 27B FP8 | 256K / FP16 KV | **191.89 tok/s** | **189.38 tok/s** |
 
-两组均为单请求测试，使用 DFlash2（默认 K=7）和高投机命中率的纯文本合成输入。2080 Ti profile 同时支持图片消息，图片功能与吞吐口径分开验证。真实任务吞吐会受到 draft 接受率影响，可能无法达到以上数据。
+两组均为单请求测试，使用 DFlash2（默认 K=7）和高投机命中率的纯文本合成输入；真实任务吞吐会受到 draft 接受率影响，可能无法达到以上数据。
 
 ## 🚀 构建与启动
+
+1. 首次构建：
 
 ```bash
 git clone https://github.com/weicj/vLLM-2080Ti-Definitive.git
@@ -81,9 +83,25 @@ cd vLLM-2080Ti-Definitive
 ./build.sh
 ```
 
-运行 `./launcher.sh` 即可通过交互菜单配置和管理服务：分别选择 target 与 DFlash
-draft 权重、应用 Profile、设置 GPU 和 TP/PP 拓扑、选择启动模式与网络配置，并在
-启动时自动完成健康检查和 smoke 测试；也可以在菜单中停止已启动的服务。
+2. 将已有仓库更新到最新 GitHub Release：
+
+```bash
+./update.sh
+```
+
+更新脚本会保留本地虚拟环境、依赖缓存、日志、结果以及 `profiles/local`，比较本地
+`VERSION` 与最新 Release，下载对应源码归档，并在更新完成后询问是否立即运行
+`build.sh`。
+
+3. 启动和管理服务：
+
+```bash
+./launcher.sh
+```
+
+交互式 launcher 可选择 target 与 DFlash draft 权重、应用 Profile、设置 GPU 和
+TP/PP 拓扑、选择启动模式与网络配置，并在启动时自动完成健康检查和 smoke 测试；
+也可以在菜单中停止已启动的服务。
 
 ![launcher.sh 交互式主菜单](docs/assets/launcher-main-menu.png)
 
@@ -91,28 +109,28 @@ draft 权重、应用 Profile、设置 GPU 和 TP/PP 拓扑、选择启动模式
 
 ```bash
 MODEL_DIR=/path/to/checkpoint \
-PROFILE=2x2080Ti/qwen27b/w8a16/normal/mtp-fp8kv-1x256k-text-only.env \
-MODE=normal GPU_DEVICES=4,5 TP_SIZE=2 \
+PROFILE=2x2080Ti/qwen27b/w8a16/mtp4-fp8kv-1x256k-text-only.env \
+MODE=fast GPU_DEVICES=1,5 TP_SIZE=2 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
 
-使用 `./launcher.sh --print-config` 预览路线。可用 profile 见
-[2x2080Ti](profiles/2x2080Ti/README.zh-CN.md) 和
-[4xT10](profiles/4xT10/README.zh-CN.md)；自动化部署见
+使用 `./launcher.sh --print-config` 预览路线。自动化部署见
 [非交互启动说明](docs/non-interactive-launch.zh-CN.md)。
 
 ## 🧭 Profile 与推荐路线
 
-Profile 按 `profiles/<硬件>/<模型>/<权重>/<模式>/<路线>.env` 组织，例如
-`2x2080Ti/qwen27b/w8a16/normal/mtp-fp8kv-1x256k-text-only.env`、
-`2x2080Ti/qwen35b/w8a16/normal/nomtp-fp16kv-1x256k-text-only.env` 和
-`4xT10/qwen27b/w8a16/normal/mtp-fp16kv-1x256k-text-image.env`。
+目录结构和路线字段请参阅 [Profile 指南](profiles/README.zh-CN.md)；详细 Profile
+说明与参考性能见 [2x2080Ti](profiles/2x2080Ti/README.zh-CN.md) 和
+[4xT10](profiles/4xT10/README.zh-CN.md)。
+
+Profile 按扁平路径 `profiles/<硬件>/<模型>/<权重>/<路线>.env` 组织。启动模式由
+launcher 选择，默认 `MODE=fast`；也可以由 launcher 或 profile 显式设置。
 
 可用模式：
 
 - `normal`：稳定的日常部署模式。
-- `fast`：更高性能模式，只用于已验证路线。
-- `aggressive`：性能最高但质量风险也最高。
+- `fast`：用于已验证路线的更高性能模式，也是默认模式。
+- `aggressive`：性能最高，但质量风险也最高。
 - `safe`：用于排障和兼容性的保守回退模式。
 
 Profile 只选择路线参数。GPU、端口、target 与 draft 模型路径、chat template 和

@@ -370,6 +370,46 @@ def test_prefill_batch_barrier_ignores_blocked_waiting_request():
     assert blocked in scheduler.skipped_waiting
 
 
+def test_prefill_batch_barrier_ignores_kv_admission_blocked_request():
+    """A waiting peer that cannot reserve its full ISL must not stall prefill."""
+    scheduler = create_scheduler(
+        max_num_seqs=2,
+        max_num_batched_tokens=512,
+        max_model_len=1024,
+        num_blocks=96,
+        block_size=16,
+        enable_chunked_prefill=True,
+        long_prefill_token_threshold=512,
+        prefill_batch_barrier=True,
+    )
+    running, blocked = create_requests(
+        num_requests=2, num_tokens=1024, req_ids=["running", "blocked"]
+    )
+    scheduler.add_request(running)
+    first = scheduler.schedule()
+    assert first.num_scheduled_tokens == {"running": 512}
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=["running"],
+            req_id_to_index={"running": 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.add_request(blocked)
+    admission_blocked = scheduler.schedule()
+    assert admission_blocked.num_scheduled_tokens == {}
+
+    # The failed admission must not remain in the shared frontier and prevent
+    # the already admitted request from making progress forever.
+    resumed = scheduler.schedule()
+    assert resumed.num_scheduled_tokens == {"running": 511}
+
+
 def test_prefill_batch_barrier_does_not_pause_decode_for_late_request():
     """A late prefill joins an active decode step instead of forcing a gap."""
     scheduler = create_scheduler(

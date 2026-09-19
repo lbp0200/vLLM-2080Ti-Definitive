@@ -342,6 +342,7 @@ class Scheduler(SchedulerInterface):
                 "Prefill batch barrier enabled: peer prefills advance on a "
                 "shared frontier before entering decode."
             )
+        self._prefill_barrier_admission_blocked: set[str] = set()
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
@@ -640,6 +641,8 @@ class Scheduler(SchedulerInterface):
                     request
                     for request in self.waiting
                     if request.num_computed_tokens < request.num_prompt_tokens
+                    and request.request_id
+                    not in self._prefill_barrier_admission_blocked
                 )
                 prefill_candidates.extend(
                     itertools.islice(waiting_candidates, available_slots)
@@ -1281,6 +1284,13 @@ class Scheduler(SchedulerInterface):
                 if new_blocks is None:
                     # The request cannot be scheduled.
 
+                    # Do not let a request that failed KV admission remain the
+                    # prefill barrier's highest frontier. Otherwise it pauses
+                    # the admitted request that must finish to free its KV,
+                    # producing a permanent no-work scheduling loop.
+                    if self.prefill_batch_barrier:
+                        self._prefill_barrier_admission_blocked.add(request_id)
+
                     # NOTE: we need to untouch the request from the encode cache
                     # manager
                     if request.has_encoder_inputs:
@@ -1314,6 +1324,7 @@ class Scheduler(SchedulerInterface):
                     )
 
                 request = request_queue.pop_request()
+                self._prefill_barrier_admission_blocked.discard(request_id)
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
@@ -2745,6 +2756,7 @@ class Scheduler(SchedulerInterface):
 
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
+        self._prefill_barrier_admission_blocked.discard(request_id)
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)

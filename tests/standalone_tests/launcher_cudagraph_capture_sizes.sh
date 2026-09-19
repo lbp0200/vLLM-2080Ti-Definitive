@@ -26,9 +26,18 @@ assert_capture_sizes 7 2 "8,16"
 assert_capture_sizes 7 3 "8,16,24"
 assert_capture_sizes 5 3 "6,12,18"
 
+dflash_profile=$(mktemp)
+trap 'rm -f "$dflash_profile"' EXIT
+printf '%s\n' \
+  'MODEL_FAMILY=qwen35moe' \
+  'MODEL_VARIANT=nvfp4' \
+  'KV_CACHE_DTYPE=turboquant_4bit_nc' \
+  'MAX_NUM_SEQS=2' \
+  'SPECULATIVE_METHOD=dflash' \
+  'SPECULATIVE_TOKENS=7' > "$dflash_profile"
+
 unset LONG_PREFILL_TOKEN_THRESHOLD PREFILL_BATCH_BARRIER TP_SIZE
-apply_profile_overrides \
-  "$ROOT/profiles/2x2080Ti/qwen27b/w4a16/fast/dflash2-tqk8v4-2x172k-text-only.env"
+apply_profile_overrides "$dflash_profile"
 TP_SIZE=2
 apply_speculative_runtime_defaults
 [[ "$LONG_PREFILL_TOKEN_THRESHOLD" == "2560" ]]
@@ -65,5 +74,17 @@ VLLM_ARGS=()
 build_args 127.0.0.1
 args=$(printf '%s\n' "${VLLM_ARGS[@]}")
 ! grep -Fxq -- '--prefill-batch-barrier' <<<"$args"
+
+capacity_log=$(mktemp)
+trap 'rm -f "$dflash_profile" "$capacity_log"' EXIT
+printf '%s\n' 'GPU KV cache size: 357,194 tokens, Maximum concurrency: 2.03x' > "$capacity_log"
+MAX_MODEL_LEN=176128
+MAX_NUM_SEQS=2
+validate_configured_kv_concurrency "$capacity_log" >/dev/null
+MAX_MODEL_LEN=180224
+if validate_configured_kv_concurrency "$capacity_log" >/dev/null 2>&1; then
+  echo "expected insufficient KV concurrency to fail" >&2
+  exit 1
+fi
 
 echo "launcher_cudagraph_capture_sizes_ok"

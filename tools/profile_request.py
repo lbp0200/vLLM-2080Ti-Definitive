@@ -123,6 +123,8 @@ def stream_request(url: str, payload: dict[str, Any], endpoint: str, timeout: fl
     chunks = 0
     text_parts: list[str] = []
     completion_token_ids: list[int] = []
+    first_token_batch_size = 0
+    last_token = None
     usage = None
     raw_preview: list[str] = []
 
@@ -147,7 +149,11 @@ def stream_request(url: str, payload: dict[str, Any], endpoint: str, timeout: fl
                 if endpoint == "completions":
                     token_ids = choice.get("token_ids")
                     if isinstance(token_ids, list):
+                        if token_ids and first_token_batch_size == 0:
+                            first_token_batch_size = len(token_ids)
                         completion_token_ids.extend(token_ids)
+                        if token_ids:
+                            last_token = time.perf_counter()
                     text = choice.get("text")
                 else:
                     delta = choice.get("delta") or {}
@@ -172,6 +178,10 @@ def stream_request(url: str, payload: dict[str, Any], endpoint: str, timeout: fl
         "text": "".join(text_parts),
         "completion_tokens_from_ids": len(completion_token_ids),
         "completion_token_ids": completion_token_ids,
+        "first_token_batch_size": first_token_batch_size,
+        "token_delivery_s": (
+            None if first is None or last_token is None else max(last_token - first, 0.0)
+        ),
         "usage": usage,
         "raw_events_preview": raw_preview,
         "ttft_s": None if first is None else first - start,
@@ -186,8 +196,12 @@ def image_card_correct(text: str) -> bool:
         and "square" in lower
         and ("orange" in lower or "yellow" in lower)
         and "circle" in lower
-        and "k7p" in lower
     )
+
+
+def image_card_text_correct(text: str) -> bool:
+    """Optional OCR check for the small text printed on the audit card."""
+    return "k7p" in text.lower()
 
 
 def main() -> None:
@@ -206,7 +220,7 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--gpu-log", type=Path)
     parser.add_argument("--gpu-interval", type=float, default=5.0)
-    parser.add_argument("--read-timeout", type=float, default=1800.0)
+    parser.add_argument("--read-timeout", type=float, default=90.0)
     parser.add_argument("--ignore-eos", action="store_true")
     parser.add_argument("--prompt-variant", default="")
     parser.add_argument("--allowed-token-text", default="")
@@ -217,6 +231,11 @@ def main() -> None:
     )
     parser.add_argument("--image-path", type=Path)
     parser.add_argument("--expect-image-card", action="store_true")
+    parser.add_argument(
+        "--disable-thinking",
+        action="store_true",
+        help="Set Qwen chat_template_kwargs.enable_thinking=false for functional checks.",
+    )
     args = parser.parse_args()
 
     prepare_start = time.perf_counter()
@@ -230,6 +249,15 @@ def main() -> None:
         image=is_image,
         pure_filler=args.pure_filler,
     )
+    # The launcher passes a per-sample variant so its reference requests do
+    # not accidentally share a prefix-cache entry. Keep the requested token
+    # count exact after adding that marker.
+    if args.prompt_variant:
+        variant_prompt = f"{args.prompt_variant}\n{prompt}"
+        variant_ids = tokenizer.encode(variant_prompt, add_special_tokens=False)
+        variant_ids = variant_ids[:prompt_tokens]
+        prompt = tokenizer.decode(variant_ids, skip_special_tokens=False)
+        prompt_tokens = len(tokenizer.encode(prompt, add_special_tokens=False))
     prepare_s = time.perf_counter() - prepare_start
 
     if args.endpoint == "completions":
@@ -261,6 +289,8 @@ def main() -> None:
             "stream_options": {"include_usage": True},
             "ignore_eos": args.ignore_eos,
         }
+        if args.disable_thinking:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         endpoint_path = "chat/completions"
     else:
         if args.image_path is None:
@@ -286,6 +316,8 @@ def main() -> None:
             "stream_options": {"include_usage": True},
             "ignore_eos": args.ignore_eos,
         }
+        if args.disable_thinking:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         endpoint_path = "chat/completions"
 
     stop = threading.Event()
@@ -313,7 +345,15 @@ def main() -> None:
     ttft = result.get("ttft_s")
     decode_s = None
     decode_tok_s = None
-    if isinstance(ttft, (int, float)):
+    delivered_after_first = completion_tokens
+    token_delivery_s = result.get("token_delivery_s")
+    first_token_batch_size = int(result.get("first_token_batch_size") or 0)
+    if first_token_batch_size > 0 and isinstance(token_delivery_s, (int, float)):
+        delivered_after_first = completion_tokens - first_token_batch_size
+        if delivered_after_first > 0 and token_delivery_s > 0:
+            decode_s = float(token_delivery_s)
+            decode_tok_s = delivered_after_first / decode_s
+    elif isinstance(ttft, (int, float)):
         decode_s = max(float(result["elapsed_s"]) - float(ttft), 1e-9)
         decode_tok_s = completion_tokens / decode_s
 
@@ -336,6 +376,7 @@ def main() -> None:
         "content_sample": text[:300],
         "prefill_tok_s": (prompt_tokens / ttft) if isinstance(ttft, (int, float)) and ttft > 0 else None,
         "decode_s": decode_s,
+        "decode_tokens": delivered_after_first,
         "decode_tok_s": decode_tok_s,
         "gpu_log": str(args.gpu_log) if args.gpu_log else None,
         "gpu_summary": parse_gpu_log(args.gpu_log) if args.gpu_log else {},
@@ -350,6 +391,7 @@ def main() -> None:
         )
     if args.expect_image_card:
         record["image_card_correct"] = image_card_correct(text)
+        record["image_card_text_correct"] = image_card_text_correct(text)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")

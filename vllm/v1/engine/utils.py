@@ -212,12 +212,21 @@ class CoreEngineProcManager:
                 needs_device_env_isolation = not (
                     current_platform.is_cuda_alike() or current_platform.is_xpu()
                 )
-                if is_dp and (
-                    needs_device_env_isolation or vllm_config.parallel_config.use_ray
-                ):
-                    set_assigned_physical_gpu_ids_for_dp_rank(
-                        vllm_config, local_dp_rank, user_assigned_gpu_ids
-                    )
+                if user_assigned_gpu_ids is not None:
+                    if is_dp and (
+                        needs_device_env_isolation
+                        or vllm_config.parallel_config.use_ray
+                    ):
+                        set_assigned_physical_gpu_ids_for_dp_rank(
+                            vllm_config, local_dp_rank, user_assigned_gpu_ids
+                        )
+                    elif not is_dp:
+                        # EngineCore and its TP/PP workers are separate
+                        # processes. Preserve explicit physical GPU selection
+                        # even when CUDA_VISIBLE_DEVICES is not inherited.
+                        vllm_config.parallel_config.assigned_physical_gpu_ids = (
+                            list(user_assigned_gpu_ids)
+                        )
 
                 with numa_utils.configure_subprocess(
                     # EngineCore itself does not have a TP/PP-local rank.

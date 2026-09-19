@@ -19,11 +19,11 @@ For usage feedback, feature requests, and community discussion, join the
 
 ![Live single-request throughput demo](docs/assets/vllmspeed_dflash.gif)
 
-Current 0.2.x baseline: `v0.2.1-RC`
+Current 0.2.x baseline: `v0.2.1`
 Upstream baseline: `b23433088b` (`v0.29.1rc0-33`)
 
 Branch: [`vllm-2080ti-definitive-0.2.x`](https://github.com/weicj/vLLM-2080Ti-Definitive/tree/vllm-2080ti-definitive-0.2.x)
-Release reference: [v0.2.1-RC](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.1-RC)
+Release reference: [v0.2.1](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.1)
 Release history: [CHANGELOG.md](CHANGELOG.md)
 
 ## 💡 Why RTX 2080 Ti For LLM Inference?
@@ -46,8 +46,9 @@ The fork turns those hardware properties into a usable serving stack through
 Marlin, FlashInfer/FlashQLA, TurboQuant/INT8 KV, MTP/DFlash2, and CUDA Graph support.
 
 The second supported hardware family is four 16 GiB Tesla T10 GPUs over PCIe.
-Those profiles target TP=4 Qwen 27B serving, including 256K-context text and
-image routes with the ABI-matched PCIe custom all-reduce extension.
+Those profiles target TP=4 Qwen 27B serving. The 18-route library has been
+audited for startup and reference workloads; routes with a noted image-semantic
+failure remain explicitly marked as candidates.
 
 ## 🧩 Support Status
 
@@ -70,14 +71,16 @@ Current tested model and weight routes:
 
 ## ⚡ Highlights
 
-| Hardware | Weight | Context / KV | Mode / Messages | 4K/128 prefill / decode | 32K/512 prefill / decode |
-| --- | --- | --- | --- | ---: | ---: |
-| 2x RTX 2080 Ti | Qwen3.8 27B NVFP4 | 256K / FP8 | fast / text+image | **1440.77 / 222.12 tok/s** | **1285.16 / 209.80 tok/s** |
-| 4x Tesla T10 | Qwen3.8 27B FP8 | 256K / FP16 | fast / text-only | **1444.73 / 190.78 tok/s** | **1456.77 / 188.94 tok/s** |
+| Hardware | Weight | Context / KV | 4K Prompt decode | 32K Prompt decode |
+| --- | --- | --- | ---: | ---: |
+| 2x RTX 2080 Ti | Qwen3.8 27B NVFP4 | 256K / FP8 KV | **220.84 tok/s** | **209.35 tok/s** |
+| 4x Tesla T10 | Qwen3.8 27B FP8 | 256K / FP16 KV | **191.89 tok/s** | **189.38 tok/s** |
 
-Both are single-request results using DFlash2 (default K=7) with high-speculative-acceptance, text-only synthetic inputs. The 2080 Ti profile also accepts image messages; image functionality was validated separately from the throughput lane. Real-task throughput depends on the draft acceptance rate and may not reach the figures above.
+Both rows are single-request tests using DFlash2 (default K=7) and synthetic text inputs with high speculative-hit rates. Real-task throughput depends on draft acceptance and may not reach these figures.
 
 ## 🚀 Build And Launch
+
+1. Build a new checkout:
 
 ```bash
 git clone https://github.com/weicj/vLLM-2080Ti-Definitive.git
@@ -85,10 +88,27 @@ cd vLLM-2080Ti-Definitive
 ./build.sh
 ```
 
-Run `./launcher.sh` to configure and manage a service interactively. It can
-select target and DFlash draft checkpoints, apply a profile, configure GPU and
-TP/PP topology, choose the launch mode and network settings, start the service
-with health and smoke checks, and stop a running service.
+2. Update an existing checkout to the latest GitHub Release:
+
+```bash
+./update.sh
+```
+
+The update helper preserves local environments, dependency caches, logs,
+results, and `profiles/local`. It compares `VERSION` with the latest release,
+downloads the matching source archive, and offers to run `build.sh` after the
+refresh.
+
+3. Start and manage the service:
+
+```bash
+./launcher.sh
+```
+
+The interactive launcher selects target and DFlash draft checkpoints, applies a
+profile, configures GPU and TP/PP topology, chooses the launch mode and network
+settings, starts the service with health and smoke checks, and stops a running
+service.
 
 ![launcher.sh interactive main menu](docs/assets/launcher-main-menu.png)
 
@@ -96,28 +116,29 @@ For automated deployment, pass the configuration non-interactively:
 
 ```bash
 MODEL_DIR=/path/to/checkpoint \
-PROFILE=2x2080Ti/qwen27b/w8a16/normal/mtp-fp8kv-1x256k-text-only.env \
-MODE=normal GPU_DEVICES=4,5 TP_SIZE=2 \
+PROFILE=2x2080Ti/qwen27b/w8a16/mtp4-fp8kv-1x256k-text-only.env \
+MODE=fast GPU_DEVICES=1,5 TP_SIZE=2 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
 
-Use `./launcher.sh --print-config` to preview a route. Available profiles are
-listed for [2x2080Ti](profiles/2x2080Ti/README.md) and
-[4xT10](profiles/4xT10/README.md). See the
+Use `./launcher.sh --print-config` to preview a route. See the
 [non-interactive launch guide](docs/non-interactive-launch.md) for automation.
 
 ## 🧭 Profiles
 
-Profiles use the layout `profiles/<hardware>/<model>/<weight>/<mode>/<route>.env`;
-for example,
-`2x2080Ti/qwen27b/w8a16/normal/mtp-fp8kv-1x256k-text-only.env`,
-`2x2080Ti/qwen35b/w8a16/normal/nomtp-fp16kv-1x256k-text-only.env`, and
-`4xT10/qwen27b/w8a16/normal/mtp-fp16kv-1x256k-text-image.env`.
+Read the [Profile Guide](profiles/README.md) for the layout and route fields.
+Detailed profiles and reference performance are listed for
+[2x2080Ti](profiles/2x2080Ti/README.md) and
+[4xT10](profiles/4xT10/README.md).
+
+Profiles use the flat layout `profiles/<hardware>/<model>/<weight>/<route>.env`.
+The launcher selects the startup mode and defaults to `MODE=fast`; the mode can
+also be set explicitly by the launcher or profile.
 
 Available modes:
 
 - `normal`: stable daily deployment mode.
-- `fast`: higher-performance mode, to be used only with a validated route.
+- `fast`: higher-performance mode for validated routes; this is the default mode.
 - `aggressive`: highest-performance mode with increased quality risk.
 - `safe`: conservative fallback for troubleshooting and compatibility.
 

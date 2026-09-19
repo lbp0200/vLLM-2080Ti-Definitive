@@ -2,6 +2,18 @@
 
 This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately from upstream vLLM releases.
 
+## v0.2.1 - 2026-09-19
+
+Stable release for the CUDA 13 / PyTorch 2.13 SM75 line.
+
+- Promotes the RC after final route, launcher, and documentation validation.
+- Publishes the formal `v0.2.1` version metadata and restores the release
+  update helper for in-place upgrades from an existing checkout.
+- Finalizes the flat Profile Guide, hand-written Profile schema, and bilingual
+  hardware reference documentation.
+- Refreshes the 4xT10 DFlash2 reference throughput with a repeated launcher
+  measurement: 191.89 tok/s at 4K input and 189.38 tok/s at 32K input.
+
 ## v0.2.1-RC - 2026-09-18
 
 Release candidate for the CUDA 13 / PyTorch 2.13 SM75 line.
@@ -16,6 +28,8 @@ Release candidate for the CUDA 13 / PyTorch 2.13 SM75 line.
   CUDA 13 Torch/Triton mirror build path.
 - Converges profiles on validated routes, requires explicit KV precision, and
   removes unsupported concurrency presets.
+- Moves profiles to a flat hardware/model/weight route layout and makes `fast`
+  the launcher default startup mode.
 - Reworks the bilingual README and launcher guides while removing stale reports
   and redundant documentation.
 

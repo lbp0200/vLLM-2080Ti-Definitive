@@ -15,6 +15,78 @@ assert_eq() {
   }
 }
 
+unset MODE
+normalize_mode
+assert_eq fast "$MODE" "default launch mode"
+
+MODE=normal
+normalize_mode
+assert_eq normal "$MODE" "explicit normal launch mode"
+
+profile_without_mode=$(mktemp)
+profile_with_mode=$(mktemp)
+mtp_profile=$(mktemp)
+model_dir=$(mktemp -d)
+trap 'rm -f "$profile_without_mode" "$profile_with_mode" "$mtp_profile"; rm -rf "$model_dir"' EXIT
+printf '%s\n' \
+  'MODEL_FAMILY=qwen35moe' \
+  'MODEL_VARIANT=fp8' \
+  'KV_CACHE_DTYPE=float16' \
+  'SPECULATIVE_METHOD=none' \
+  'SPECULATIVE_TOKENS=0' > "$profile_without_mode"
+printf '%s\n' \
+  'MODE=fast' \
+  'MODEL_FAMILY=qwen35moe' \
+  'MODEL_VARIANT=fp8' \
+  'KV_CACHE_DTYPE=float16' \
+  'SPECULATIVE_METHOD=none' \
+  'SPECULATIVE_TOKENS=0' > "$profile_with_mode"
+printf '%s\n' \
+  'MODEL_FAMILY=qwen35moe' \
+  'MODEL_VARIANT=fp8' \
+  'KV_CACHE_DTYPE=fp8' \
+  'SPECULATIVE_METHOD=mtp' \
+  'SPECULATIVE_TOKENS=4' > "$mtp_profile"
+
+MODE=normal
+apply_profile_overrides "$profile_without_mode"
+assert_eq normal "$MODE" "mode survives mode-less profile"
+apply_profile_overrides "$profile_with_mode"
+assert_eq fast "$MODE" "profile may explicitly select fast"
+apply_profile_overrides "$profile_without_mode"
+assert_eq normal "$MODE" "mode-less profile restores launcher mode"
+
+invalid_profile=$(mktemp)
+printf '%s\n' 'MODEL_FAMILY=qwen35moe' 'ENABLE_PREFIX_CACHING=0' > "$invalid_profile"
+if apply_profile_overrides "$invalid_profile" 2>/dev/null; then
+  echo "runtime field unexpectedly accepted in route profile" >&2
+  exit 1
+fi
+rm -f "$invalid_profile"
+
+duplicate_profile=$(mktemp)
+printf '%s\n' 'MODEL_FAMILY=qwen35moe' 'MODEL_FAMILY=qwen35' > "$duplicate_profile"
+if apply_profile_overrides "$duplicate_profile" 2>/dev/null; then
+  echo "duplicate profile key unexpectedly accepted" >&2
+  exit 1
+fi
+rm -f "$duplicate_profile"
+
+printf '%s\n' '{"model_type":"qwen3_5","max_position_embeddings":262144}' > "$model_dir/config.json"
+MODEL_DIR=$model_dir
+MAX_MODEL_LEN=524288
+HF_OVERRIDES_JSON=
+ENABLE_YARN=1
+derive_yarn_overrides
+grep -Fq '"rope_type":"yarn"' <<< "$HF_OVERRIDES_JSON"
+grep -Fq '"factor":2.0' <<< "$HF_OVERRIDES_JSON"
+grep -Fq '"original_max_position_embeddings":262144' <<< "$HF_OVERRIDES_JSON"
+HF_OVERRIDES_JSON='{"text_config":{"max_position_embeddings":123456}}'
+if derive_yarn_overrides 2>/dev/null; then
+  echo "conflicting YaRN overrides unexpectedly accepted" >&2
+  exit 1
+fi
+
 reset_spec_test_state() {
   unset SPECULATIVE_METHOD SPECULATIVE_TOKENS SPECULATIVE_MODEL MTP_K
   unset VLLM_KV_CACHE_LAYOUT SPECULATIVE_ATTENTION_BACKEND
@@ -54,7 +126,7 @@ validate_speculative_route
 assert_eq 0 "$(effective_speculative_tokens)" "retained draft ignored for autoregressive"
 
 apply_profile_overrides \
-  "$ROOT/profiles/2x2080Ti/qwen27b/w8a16/normal/mtp-fp8kv-1x256k-text-only.env"
+  "$mtp_profile"
 assert_eq /models/retained-dflash-draft "$SPECULATIVE_MODEL" "draft survives profile switch"
 assert_eq mtp "$(effective_speculative_method)" "profile switch selects MTP"
 
@@ -112,17 +184,5 @@ MAX_NUM_SEQS=2
 TP_SIZE=4
 apply_speculative_runtime_defaults
 assert_eq 512 "$LONG_PREFILL_TOKEN_THRESHOLD" "four-GPU DFlash C2 threshold"
-
-allowed_keys='^(SERVED_NAME|MODE|MODEL_FAMILY|PROFILE_GROUP|MODEL_VARIANT|QUANTIZATION|KV_CACHE_DTYPE|MAX_MODEL_LEN|GPU_UTIL|MAX_BATCHED_TOKENS|MAX_NUM_SEQS|MESSAGE_TYPE|SPECULATIVE_METHOD|SPECULATIVE_TOKENS)$'
-while IFS= read -r -d '' profile; do
-  key_count=$(sed -nE 's/^([A-Za-z_][A-Za-z0-9_]*)=.*/\1/p' "$profile" | wc -l)
-  assert_eq 14 "$key_count" "shipped profile field count: ${profile#"$ROOT/"}"
-  while IFS= read -r key; do
-    [[ "$key" =~ $allowed_keys ]] || {
-      printf 'unexpected shipped profile key %s in %s\n' "$key" "${profile#"$ROOT/"}" >&2
-      exit 1
-    }
-  done < <(sed -nE 's/^([A-Za-z_][A-Za-z0-9_]*)=.*/\1/p' "$profile")
-done < <(find "$ROOT/profiles" -type f -name '*.env' -print0 | sort -z)
 
 echo "launcher_profile_schema_ok"

@@ -172,6 +172,37 @@ kv_cache_total_tokens_from_log() {
   printf '%s\n' "$total"
 }
 
+validate_configured_kv_concurrency() {
+  local log_file=$1
+  local max_num_seqs=${MAX_NUM_SEQS:-1}
+  local max_model_len=${MAX_MODEL_LEN:-0}
+  local total required
+
+  if [[ ! "$max_num_seqs" =~ ^[1-9][0-9]*$ ]] || (( max_num_seqs <= 1 )); then
+    return 0
+  fi
+  if [[ ! "$max_model_len" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: cannot validate KV concurrency: invalid MAX_MODEL_LEN=$max_model_len" >&2
+    return 1
+  fi
+  total=$(kv_cache_total_tokens_from_log "$log_file" 2>/dev/null || true)
+  if [[ ! "$total" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: cannot validate KV concurrency: GPU KV token capacity is missing from the startup log." >&2
+    return 1
+  fi
+
+  required=$((max_num_seqs * max_model_len))
+  if (( total < required )); then
+    echo "ERROR: configured concurrency cannot be admitted by the allocated GPU KV cache." >&2
+    echo "  GPU KV tokens: $total" >&2
+    echo "  Required:      $max_num_seqs x $max_model_len = $required" >&2
+    echo "  Reduce MAX_MODEL_LEN or MAX_NUM_SEQS, or increase available KV capacity." >&2
+    return 1
+  fi
+
+  echo "KV concurrency check: OK ($total tokens >= $max_num_seqs x $max_model_len = $required)"
+}
+
 kv_cache_usage_ratio_from_metrics() {
   local api_root=$1
   local metrics ratio
@@ -790,55 +821,45 @@ profile_speculative_label() {
 }
 
 ROUTE_PROFILE_KEYS=(
-  SERVED_NAME
   MODE
-  COMPATIBLE_MODES
   MODEL_FAMILY
-  PROFILE_GROUP
   MODEL_VARIANT
-  TP_SIZE
-  PP_SIZE
   QUANTIZATION
   KV_CACHE_DTYPE
+  ENABLE_YARN
   MAX_MODEL_LEN
   GPU_UTIL
   MAX_BATCHED_TOKENS
   MAX_NUM_SEQS
-  LONG_PREFILL_TOKEN_THRESHOLD
-  NO_ASYNC_SCHEDULING
-  MTP_K
   SPECULATIVE_METHOD
-  VLLM_TURBOQUANT_SPEC_DECODE_CHUNK_SIZE
   SPECULATIVE_TOKENS
-  SPECULATIVE_DRAFT_TP_SIZE
-  SPECULATIVE_MAX_MODEL_LEN
-  SPECULATIVE_ATTENTION_BACKEND
-  SPECULATIVE_KV_CACHE_DTYPE
-  SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH
-  SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION
   MESSAGE_TYPE
-  MM_LIMIT_JSON
-  LANGUAGE_MODEL_ONLY
-  SKIP_MM_PROFILING
-  HF_OVERRIDES_JSON
-  ADDITIONAL_CONFIG_JSON
-  SPECULATIVE_CONFIG
-  COMPILATION_CONFIG_JSON
-  VLLM_KV_CACHE_LAYOUT
-  ATTENTION_BACKEND
-  DISABLE_HYBRID_KV_CACHE_MANAGER
-  CUSTOM_ALL_REDUCE_MODE
-  DISABLE_CUSTOM_ALL_REDUCE
-  VLLM_ALLOW_LONG_MAX_MODEL_LEN
-  VLLM_TURBOQUANT_SPEC_DECODE_CHUNK_SIZE
-  VLLM_INT8KV_FA_CASCADE_DEQUANT
-  VLLM_INT8KV_FA_CASCADE_TILE_TOKENS
-  VLLM_INT8KV_FA_CONTINUATION_DEQUANT
-  VLLM_INT8KV_FA_PREFILL
 )
+
+PROFILE_RESET_KEYS=(
+  MODEL_FAMILY
+  MODEL_VARIANT
+  QUANTIZATION
+  KV_CACHE_DTYPE
+  ENABLE_YARN
+  MAX_MODEL_LEN
+  GPU_UTIL
+  MAX_BATCHED_TOKENS
+  MAX_NUM_SEQS
+  SPECULATIVE_METHOD
+  SPECULATIVE_TOKENS
+  MESSAGE_TYPE
+)
+
+# Tracks the optional MODE value installed by the last profile. This lets a
+# later mode-less profile preserve the launcher's current mode without
+# retaining an explicit MODE from an older profile.
+PROFILE_MODE_APPLIED=0
+PROFILE_MODE_PREVIOUS=
 
 NON_INTERACTIVE_CONFIG_KEYS=(
   MODEL_DIR
+  SERVED_NAME
   SPECULATIVE_MODEL
   PER_REQUEST_SPEC_DECODE_METRICS
   PROFILE_DIR
@@ -861,6 +882,7 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   TOOL_CALL_PARSER
   TOOL_PARSER_PLUGIN
   ENABLE_PREFIX_CACHING
+  ENABLE_YARN
   ENABLE_PROMPT_TOKENS_DETAILS
   DISABLE_PREFIX_CACHING
   VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH
@@ -895,6 +917,7 @@ NON_INTERACTIVE_BOOLEAN_KEYS=(
   SKIP_MM_PROFILING
   ENABLE_AUTO_TOOL_CHOICE
   ENABLE_PREFIX_CACHING
+  ENABLE_YARN
   ENABLE_PROMPT_TOKENS_DETAILS
   DISABLE_PREFIX_CACHING
   VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH
@@ -1138,20 +1161,16 @@ parse_launcher_args() {
 
 reset_route_profile_fields() {
   local key
-  for key in "${ROUTE_PROFILE_KEYS[@]}"; do
+  for key in "${PROFILE_RESET_KEYS[@]}"; do
     config_key_has_override "$key" && continue
     unset "$key"
   done
 }
 
-profile_key_is_global() {
+profile_key_is_allowed() {
   case "$1" in
-MODEL_DIR|SPECULATIVE_MODEL|PER_REQUEST_SPEC_DECODE_METRICS|PROFILE_DIR|PROFILE|PORT|SERVICE_SCOPE|GPU_DEVICES|\
-CHAT_TEMPLATE_FILE|CHAT_TEMPLATE_PRESET|TEMPLATE_DIR|REASONING_PARSER|\
-DEFAULT_CHAT_TEMPLATE_KWARGS|REASONING_MODE|REASONING_BUDGET|\
-ENABLE_AUTO_TOOL_CHOICE|TOOL_CALL_PARSER|TOOL_PARSER_PLUGIN|\
-ENABLE_PREFIX_CACHING|ENABLE_PROMPT_TOKENS_DETAILS|\
-VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH|VLLM_ENFORCE_STRICT_TOOL_CALLING)
+MODE|MODEL_FAMILY|MODEL_VARIANT|QUANTIZATION|KV_CACHE_DTYPE|ENABLE_YARN|MAX_MODEL_LEN|GPU_UTIL|\
+MAX_BATCHED_TOKENS|MAX_NUM_SEQS|SPECULATIVE_METHOD|SPECULATIVE_TOKENS|MESSAGE_TYPE)
       return 0
       ;;
     *)
@@ -1160,14 +1179,114 @@ VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH|VLLM_ENFORCE_STRICT_TOOL_CALLING)
   esac
 }
 
+derive_yarn_overrides() {
+  [[ "${ENABLE_YARN:-0}" == "1" ]] || return 0
+
+  local model_dir=${MODEL_DIR:-}
+  local target_len=${MAX_MODEL_LEN:-}
+  [[ -d "$model_dir" ]] || {
+    echo "ERROR: ENABLE_YARN requires a local MODEL_DIR with config.json." >&2
+    return 1
+  }
+  [[ "$target_len" =~ ^[1-9][0-9]*$ ]] || {
+    echo "ERROR: ENABLE_YARN requires a positive MAX_MODEL_LEN." >&2
+    return 1
+  }
+
+  local merged
+  merged=$(python3 - "$model_dir/config.json" "$target_len" "${HF_OVERRIDES_JSON:-}" <<'PY'
+import json
+import sys
+
+config_path, target_text, existing_text = sys.argv[1:]
+target = int(target_text)
+try:
+    with open(config_path, encoding="utf-8") as stream:
+        config = json.load(stream)
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"cannot read model config for YaRN: {exc}")
+
+text_config = config.get("text_config")
+if not isinstance(text_config, dict):
+    text_config = config
+native = text_config.get("max_position_embeddings")
+if not isinstance(native, int) or native <= 0:
+    raise SystemExit("model config has no positive max_position_embeddings for YaRN")
+if target <= native:
+    raise SystemExit(
+        f"YaRN requires MAX_MODEL_LEN ({target}) to exceed native context ({native})"
+    )
+
+factor = target / native
+generated = {
+    "text_config": {
+        "max_position_embeddings": target,
+        "rope_parameters": {
+            "rope_type": "yarn",
+            "factor": factor,
+            "original_max_position_embeddings": native,
+        },
+    },
+    "max_model_len": target,
+}
+try:
+    existing = json.loads(existing_text) if existing_text else {}
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"HF_OVERRIDES_JSON is not valid JSON: {exc}")
+if not isinstance(existing, dict):
+    raise SystemExit("HF_OVERRIDES_JSON must be a JSON object")
+
+def merge(dst, src, path=()):
+    for key, value in src.items():
+        if key not in dst:
+            dst[key] = value
+        elif isinstance(dst[key], dict) and isinstance(value, dict):
+            merge(dst[key], value, path + (key,))
+        elif dst[key] != value:
+            dotted = ".".join(path + (key,))
+            raise SystemExit(f"HF_OVERRIDES_JSON conflicts with derived YaRN field: {dotted}")
+
+merge(existing, generated)
+print(json.dumps(existing, separators=(",", ":")))
+PY
+  ) || return 1
+  HF_OVERRIDES_JSON=$merged
+  export HF_OVERRIDES_JSON
+}
+
+validate_profile_keys_for_launcher() {
+  local file=$1
+  local key invalid=0 duplicate
+  duplicate=$(sed -nE 's/^([A-Za-z_][A-Za-z0-9_]*)=.*/\1/p' "$file" | sort | uniq -d)
+  if [[ -n "$duplicate" ]]; then
+    while IFS= read -r key; do
+      [[ -n "$key" ]] || continue
+      echo "ERROR: duplicate profile key $key in $file" >&2
+      invalid=1
+    done <<< "$duplicate"
+  fi
+  if sed -nE '/^[[:space:]]*($|#)/d; /^[A-Za-z_][A-Za-z0-9_]*=.*/d' "$file" | grep -q .; then
+    echo "ERROR: invalid profile syntax in $file" >&2
+    invalid=1
+  fi
+  while IFS= read -r key; do
+    [[ -n "$key" ]] || continue
+    if ! profile_key_is_allowed "$key"; then
+      echo "ERROR: $key is not allowed in route profile $file" >&2
+      invalid=1
+    fi
+  done < <(sed -nE 's/^([A-Za-z_][A-Za-z0-9_]*)=.*/\1/p' "$file" | sort -u)
+  (( invalid == 0 ))
+}
+
 source_profile_defaults() {
   local file=$1
   [[ -f "$file" ]] || return 0
+  validate_profile_keys_for_launcher "$file" || return 1
 
   local key value
   while IFS= read -r key; do
     [[ -n "$key" ]] || continue
-    profile_key_is_global "$key" && continue
     if config_key_has_override "$key" || [[ ${!key+x} ]]; then
       continue
     fi
@@ -1180,16 +1299,33 @@ source_profile_defaults() {
 apply_profile_overrides() {
   local file=$1
   [[ -f "$file" ]] || return 0
+  validate_profile_keys_for_launcher "$file" || return 1
 
-  local key value
+  local key value profile_mode
   reset_route_profile_fields
+  profile_mode=$(read_profile_value "$file" MODE)
+  if [[ -n "$profile_mode" ]] && ! config_key_has_override MODE; then
+    PROFILE_MODE_PREVIOUS=${MODE:-}
+  fi
+  if [[ "$PROFILE_MODE_APPLIED" == "1" ]] && ! config_key_has_override MODE; then
+    if [[ -n "$PROFILE_MODE_PREVIOUS" ]]; then
+      MODE=$PROFILE_MODE_PREVIOUS
+      export MODE
+    else
+      unset MODE
+    fi
+    PROFILE_MODE_APPLIED=0
+    PROFILE_MODE_PREVIOUS=
+  fi
   while IFS= read -r key; do
     [[ -n "$key" ]] || continue
-    profile_key_is_global "$key" && continue
     config_key_has_override "$key" && continue
     value=$(read_profile_value "$file" "$key")
     printf -v "$key" '%s' "$value"
     export "$key"
+    if [[ "$key" == MODE ]]; then
+      PROFILE_MODE_APPLIED=1
+    fi
   done < <(sed -nE 's/^([A-Za-z_][A-Za-z0-9_]*)=.*/\1/p' "$file" | sort -u)
 }
 
@@ -1226,7 +1362,6 @@ save_manager_state() {
     printf 'TEMPLATE_DIR=%q\n' "${TEMPLATE_DIR:-}"
     printf 'PROFILE=%q\n' "${PROFILE:-}"
     printf 'MODEL_FAMILY=%q\n' "${MODEL_FAMILY:-}"
-    printf 'PROFILE_GROUP=%q\n' "${PROFILE_GROUP:-}"
     printf 'MODEL_VARIANT=%q\n' "${MODEL_VARIANT:-}"
     printf 'SERVED_NAME=%q\n' "${SERVED_NAME:-}"
     printf 'GPU_DEVICES=%q\n' "${GPU_DEVICES:-}"
@@ -1281,7 +1416,7 @@ save_manager_state() {
     printf 'DISABLE_CUSTOM_ALL_REDUCE=%q\n' "${DISABLE_CUSTOM_ALL_REDUCE:-}"
     printf 'DISABLE_LOG_STATS=%q\n' "${DISABLE_LOG_STATS:-}"
     printf 'VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=%q\n' "${VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH:-}"
-    printf 'MODE=%q\n' "${MODE:-normal}"
+    printf 'MODE=%q\n' "${MODE:-fast}"
     printf 'PORT=%q\n' "${PORT:-8000}"
     printf 'SERVICE_SCOPE=%q\n' "${SERVICE_SCOPE:-local}"
     printf 'LAST_PID_FILE=%q\n' "${LAST_PID_FILE:-}"
@@ -1346,50 +1481,18 @@ model_families_match() {
   return 1
 }
 
-first_compatible_mode() {
-  local compatible_modes=${1:-safe,normal,fast}
-  local candidate
-  for candidate in ${compatible_modes//,/ }; do
-    candidate=${candidate//[[:space:]]/}
-    case "$candidate" in
-      stable) echo safe; return 0 ;;
-      speed) echo normal; return 0 ;;
-      safe|normal|fast|aggressive) echo "$candidate"; return 0 ;;
-    esac
-  done
-  echo safe
-}
-
-mode_is_compatible() {
-  local mode=$1
-  local compatible_modes=${2:-safe,normal,fast}
-  local candidate
-
-  for candidate in ${compatible_modes//,/ }; do
-    candidate=${candidate//[[:space:]]/}
-    case "$candidate" in
-      stable) candidate=safe ;;
-      speed) candidate=normal ;;
-    esac
-    if [[ "$mode" == "aggressive" ]]; then
-      [[ "$candidate" == "aggressive" || "$candidate" == "fast" ]] && return 0
-      continue
-    fi
-    [[ "$candidate" == "$mode" ]] && return 0
-  done
-  return 1
-}
-
 profile_family_dir() {
   if [[ -n "${PROFILE:-}" && "$PROFILE" == */* ]]; then
-    printf '%s\n' "${PROFILE%%/*}"
+    local parent=${PROFILE%/*}
+    [[ "${parent##*/}" == "user" ]] && parent=${parent%/*}
+    printf '%s\n' "$parent"
     return 0
   fi
   case "${MODEL_FAMILY:-}" in
     gemma*) echo gemma31b ;;
     qwen4*) echo qwen38flashnext ;;
     qwen35moe)
-      if [[ "${PROFILE_GROUP:-}" == *35b* ]]; then
+      if [[ "${MODEL_DIR,,} ${SERVED_NAME,,}" == *35b* ]]; then
         echo qwen35b
       else
         echo qwen27b
@@ -1400,33 +1503,6 @@ profile_family_dir() {
       printf '%s\n' "${MODEL_FAMILY//[^A-Za-z0-9_.-]/-}"
       ;;
   esac
-}
-
-profile_compatible_modes_for_current() {
-  normalize_mode
-  local mode=${MODE:-normal}
-  local kv=${KV_CACHE_DTYPE:-}
-  local spec_tokens
-  spec_tokens=$(effective_speculative_tokens)
-
-  if [[ "$mode" == "aggressive" ]]; then
-    echo aggressive
-    return 0
-  fi
-
-  if [[ "$mode" == "safe" ]]; then
-    case "$kv" in
-      ""|fp16|default|auto)
-        ;;
-      *)
-        if [[ "$spec_tokens" =~ ^[0-9]+$ ]] && (( spec_tokens > 0 )); then
-          echo fast
-          return 0
-        fi
-        ;;
-    esac
-  fi
-  echo "$mode"
 }
 
 sanitize_profile_name() {
@@ -1510,7 +1586,7 @@ reasoning_parser_is_disabled() {
 }
 
 default_qwen_reasoning_parser_applies() {
-  local model_dir_l served_l profile_l group_l
+  local model_dir_l served_l profile_l
 
   [[ "${MODEL_FAMILY:-}" == qwen* ]] || return 1
 
@@ -1518,16 +1594,13 @@ default_qwen_reasoning_parser_applies() {
   served_l=${SERVED_NAME,,}
   profile_l=${PROFILE:-}
   profile_l=${profile_l,,}
-  group_l=${PROFILE_GROUP:-}
-  group_l=${group_l,,}
-
-  case "$group_l" in
-    qwen3*|qwen36*)
+  case "${MODEL_FAMILY:-}" in
+    qwen35|qwen35moe)
       return 0
       ;;
   esac
   case "$profile_l" in
-    qwen27b/*)
+    */qwen27b/*|*/qwen35b/*)
       return 0
       ;;
   esac
@@ -1913,9 +1986,8 @@ profile_summary() {
 
   local keys=(
     SERVED_NAME
-    COMPATIBLE_MODES
+    MODE
     MODEL_FAMILY
-    PROFILE_GROUP
     MODEL_VARIANT
     TP_SIZE
     PP_SIZE
@@ -2524,10 +2596,10 @@ actual launch configuration.
 Notes:
   - safe mode: eager fallback. Use it only for diagnosis or conservative
     fallback, not as the formal serving performance route.
-  - normal mode: non-eager production default once the selected route has
-    passed quality smoke.
-  - fast mode: non-eager + full graph. Highest throughput path,
-    intended for performance exploration and quality-risk-tolerant use.
+  - normal mode: non-eager conservative override for routes that should not
+    use full graph execution.
+  - fast mode: default production route with non-eager + full graph execution.
+    Published profile performance uses this mode.
   - aggressive mode: more aggressive mode with the highest performance and
     quality risk.
   - Chat-template presets live under profiles/templates and are global launcher
@@ -2571,14 +2643,13 @@ show_profiles() {
     profile_file="$PROFILE_DIR/$profile"
     family=$(read_profile_value "$profile_file" MODEL_FAMILY)
     variant=$(read_profile_value "$profile_file" MODEL_VARIANT)
-    mode=$(read_profile_value "$profile_file" COMPATIBLE_MODES)
-    [[ -n "$mode" ]] || mode=$(read_profile_value "$profile_file" MODE)
+    mode=$(read_profile_value "$profile_file" MODE)
     kv=$(read_profile_value "$profile_file" KV_CACHE_DTYPE)
     context=$(read_profile_value "$profile_file" MAX_MODEL_LEN)
     spec=$(profile_speculative_label "$profile_file")
     seqs=$(read_profile_value "$profile_file" MAX_NUM_SEQS)
-    printf '  %-62s compatible=%-12s family=%-7s weight=%-6s kv=%-24s ctx=%-8s spec=%-14s seqs=%s\n' \
-      "$profile" "${mode:-safe,normal,fast}" "${family:-auto}" "${variant:-auto}" "${kv:-fp16}" "${context:-auto}" "${spec:-off}" "${seqs:-1}"
+    printf '  %-62s mode=%-8s family=%-7s weight=%-6s kv=%-24s ctx=%-8s spec=%-14s seqs=%s\n' \
+      "$profile" "${mode:-launcher}" "${family:-auto}" "${variant:-auto}" "${kv:-fp16}" "${context:-auto}" "${spec:-off}" "${seqs:-1}"
   done < <(list_profiles)
   echo
   pause_enter
@@ -2806,7 +2877,7 @@ select_weight_dir() {
 }
 
 apply_profile_preset_menu() {
-  local profiles=() selected profile_file choices=() compatible_modes
+  local profiles=() selected profile_file choices=()
   if [[ -n "${MODEL_FAMILY:-}" ]]; then
     mapfile -t profiles < <(list_profiles_for_model "$MODEL_FAMILY" "${QUANTIZATION:-}")
   else
@@ -2838,13 +2909,7 @@ apply_profile_preset_menu() {
   echo "Profile applied. Use \"Edit current runtime parameters\" if you want to override fields."
   echo
   apply_profile_overrides "$profile_file"
-  compatible_modes=${COMPATIBLE_MODES:-$(read_profile_value "$profile_file" COMPATIBLE_MODES)}
   normalize_mode
-  if ! mode_is_compatible "${MODE:-normal}" "$compatible_modes"; then
-    MODE=$(first_compatible_mode "$compatible_modes")
-    echo "Launch mode switched to compatible mode: $MODE"
-    echo
-  fi
   save_manager_state
   pause_enter
 }
@@ -2877,10 +2942,8 @@ save_current_profile_menu() {
 
   mkdir -p "$target_dir"
   : > "$target_file.tmp"
-  write_profile_entry "$target_file.tmp" SERVED_NAME "${SERVED_NAME:-$safe_name}"
-  write_profile_entry "$target_file.tmp" MODE "${MODE:-normal}"
+  write_profile_entry "$target_file.tmp" MODE "${MODE:-fast}"
   write_profile_entry "$target_file.tmp" MODEL_FAMILY "${MODEL_FAMILY:-}"
-  write_profile_entry "$target_file.tmp" PROFILE_GROUP "${PROFILE_GROUP:-}"
   write_profile_entry "$target_file.tmp" MODEL_VARIANT "${MODEL_VARIANT:-}"
   write_profile_entry "$target_file.tmp" QUANTIZATION "${QUANTIZATION:-}"
   write_profile_entry "$target_file.tmp" KV_CACHE_DTYPE "${KV_CACHE_DTYPE:-}"
@@ -2896,7 +2959,7 @@ save_current_profile_menu() {
   PROFILE="$family_dir/user/${safe_name}.env"
   save_manager_state
   echo "Saved profile: $target_file"
-  echo "Launch mode: ${MODE:-normal}"
+  echo "Launch mode: ${MODE:-fast}"
   echo
   pause_enter
 }
@@ -3217,7 +3280,6 @@ edit_runtime_parameters() {
   fi
 
   MODEL_FAMILY=$(prompt_default "Model architecture (qwen35/qwen35moe/qwen4/gemma4)" "${MODEL_FAMILY:-$(guess_model_family "${MODEL_DIR:-}")}") || return 0
-  PROFILE_GROUP=$(prompt_optional "Profile group" "${PROFILE_GROUP:-}") || return 0
   MODEL_VARIANT=$(prompt_optional "Weight precision/profile variant" "${MODEL_VARIANT:-}") || return 0
   SERVED_NAME=$(prompt_default "Served model name" "${SERVED_NAME:-${MODEL_DIR:+$(basename "$MODEL_DIR")}}") || return 0
   QUANTIZATION=$(prompt_default "vLLM --quantization (empty/auto, fp8, gptq_marlin, awq_marlin, compressed-tensors, quark)" "${QUANTIZATION:-$(guess_quantization "${MODEL_DIR:-}")}") || return 0
@@ -3424,7 +3486,7 @@ edit_speculative_decode_menu() {
 
 runtime_parameter_menu() {
   local selected choices=()
-  local model_family_value profile_group_value model_variant_value served_name_value
+  local model_family_value model_variant_value served_name_value
   local quantization_value kv_value context_value gpu_util_value
   local batch_tokens_value max_sequences_value spec_decode_value spec_metrics_value message_type_value
   local template_value reasoning_value tool_calling_value prefix_cache_value
@@ -3432,7 +3494,6 @@ runtime_parameter_menu() {
 
   while true; do
     model_family_value=$(menu_value "${MODEL_FAMILY:-$(guess_model_family "${MODEL_DIR:-}")}")
-    profile_group_value=$(menu_value "${PROFILE_GROUP:-}")
     model_variant_value=$(menu_value "${MODEL_VARIANT:-}")
     served_name_value=$(menu_value "${SERVED_NAME:-}")
     quantization_value=$(menu_value "${QUANTIZATION:-auto}")
@@ -3457,7 +3518,6 @@ runtime_parameter_menu() {
     echo
     choices=("Model architecture: $model_family_value")
     choices+=(
-      "Profile group: $profile_group_value"
       "Weight variant: $model_variant_value"
       "Served name: $served_name_value"
       "vLLM --quantization: $quantization_value"
@@ -3481,10 +3541,6 @@ runtime_parameter_menu() {
     case "$selected" in
       "Model architecture:"*)
         MODEL_FAMILY=$(prompt_default "Model architecture (qwen35/qwen35moe/qwen4/gemma4)" "${MODEL_FAMILY:-$(guess_model_family "${MODEL_DIR:-}")}") || continue
-        save_manager_state
-        ;;
-      "Profile group:"*)
-        PROFILE_GROUP=$(prompt_optional "Profile group" "${PROFILE_GROUP:-}") || continue
         save_manager_state
         ;;
       "Weight variant:"*)
@@ -3557,6 +3613,9 @@ runtime_parameter_menu() {
 normalize_mode() {
   # Compatibility shim for older state files or scripts.
   case "${MODE:-}" in
+    "")
+      MODE=fast
+      ;;
     stable)
       MODE=safe
       ;;
@@ -3568,7 +3627,7 @@ normalize_mode() {
 
 select_mode_menu() {
   normalize_mode
-  MODE=$(prompt_segmented "Launch mode" "${MODE:-normal}" safe normal fast aggressive) || return 0
+  MODE=$(prompt_segmented "Launch mode" "${MODE:-fast}" safe normal fast aggressive) || return 0
   save_manager_state
 }
 
@@ -3655,7 +3714,7 @@ show_launch_status() {
   echo "  GPU devices:  ${GPU_DEVICES:-${CUDA_VISIBLE_DEVICES:-unknown}}"
   echo "  TP / PP:      TP${TP_SIZE:-1} x PP${PP_SIZE:-1}"
   echo "  TP groups:    $(format_tp_rank_groups "${GPU_DEVICES:-${CUDA_VISIBLE_DEVICES:-}}" "${TP_SIZE:-1}" || true)"
-  echo "  Mode:         ${MODE:-safe}"
+  echo "  Mode:         ${MODE:-fast}"
   echo "  Scope:        ${SERVICE_SCOPE:-local}"
   echo "  Local API:    ${LAST_API_LOCAL:-http://127.0.0.1:${PORT:-8000}/v1}"
   if [[ -n "${LAST_API_LAN:-}" ]]; then
@@ -4433,37 +4492,7 @@ validate_spec_decode_metrics() {
 }
 
 validate_mode_kv_policy() {
-  local kv=${KV_CACHE_DTYPE:-}
-  local spec_tokens
-  local compatible_modes=${COMPATIBLE_MODES:-safe,normal,fast}
-  local mode_ok=0
-  local candidate
-  spec_tokens=$(effective_speculative_tokens)
   normalize_mode
-  local normalized_modes=${compatible_modes//,/ }
-  for candidate in $normalized_modes; do
-    case "$candidate" in
-      stable)
-        candidate=safe
-        ;;
-      speed)
-        candidate=normal
-        ;;
-    esac
-    if [[ "$MODE" == "aggressive" ]]; then
-      [[ "$candidate" == "fast" || "$candidate" == "aggressive" ]] && mode_ok=1 && break
-      continue
-    fi
-    if [[ "$candidate" == "$MODE" ]]; then
-      mode_ok=1
-      break
-    fi
-  done
-  if (( mode_ok == 0 )); then
-    echo "ERROR: MODE=$MODE is not compatible with this profile." >&2
-    echo "       Compatible modes: $compatible_modes" >&2
-    return 1
-  fi
   case "$MODE" in
     safe|normal|fast|aggressive)
       ;;
@@ -5427,6 +5456,12 @@ launch_server() {
   fi
 
   echo "Health check: OK"
+  if ! validate_configured_kv_concurrency "$log_file"; then
+    echo "Cleaning up service that cannot satisfy configured concurrency..."
+    cleanup_failed_launch "$pid_file"
+    restore_overcommit_memory || true
+    return 1
+  fi
   if [[ "${SKIP_STARTUP_SMOKE:-0}" == "1" ]]; then
     restore_overcommit_memory || true
 
@@ -5684,10 +5719,11 @@ prepare_runtime_defaults() {
     fi
   fi
   PORT=${PORT:-8000}
-  MODE=${MODE:-normal}
+  MODE=${MODE:-fast}
   normalize_mode
   SERVICE_SCOPE=${SERVICE_SCOPE:-local}
   normalize_message_type_defaults
+  derive_yarn_overrides || return 1
   apply_speculative_runtime_defaults
   apply_prefix_cache_defaults
   ENABLE_AUTO_TOOL_CHOICE=$(normalize_bool "${ENABLE_AUTO_TOOL_CHOICE:-0}")
@@ -5835,7 +5871,7 @@ main_menu_item_text() {
       printf '3. GPU/TP/PP:       %s / TP%s x PP%s' \
         "$(menu_value "$gpu_devices")" "$tp_size" "$pp_size"
       ;;
-    4) printf '4. Launch mode:      %s' "${MODE:-normal}" ;;
+    4) printf '4. Launch mode:      %s' "${MODE:-fast}" ;;
     5) printf '5. Port:             %s' "${PORT:-8000}" ;;
     6) printf '6. Service scope:    %s' "$(current_scope_label)" ;;
     7) printf '7. Help' ;;
@@ -6036,7 +6072,7 @@ service_manager() {
      normalized_devices=$(gpu_devices_to_indices "$GPU_DEVICES"); then
     GPU_DEVICES=$normalized_devices
   fi
-  MODE=${MODE:-normal}
+  MODE=${MODE:-fast}
   PORT=${PORT:-8000}
   SERVICE_SCOPE=${SERVICE_SCOPE:-local}
 
