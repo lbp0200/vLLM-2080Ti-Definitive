@@ -14,7 +14,7 @@ Stable release for the CUDA 13 / PyTorch 2.13 SM75 line.
 - Refreshes the 4xT10 DFlash2 reference throughput with a repeated launcher
   measurement: 191.89 tok/s at 4K input and 189.38 tok/s at 32K input.
 
-## v0.2.1-RC - 2026-09-18
+## v0.2.1-RC1 - 2026-09-18
 
 Release candidate for the CUDA 13 / PyTorch 2.13 SM75 line.
 
