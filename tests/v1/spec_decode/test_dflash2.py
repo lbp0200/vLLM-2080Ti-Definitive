@@ -6,16 +6,17 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.model_executor.models.qwen3_dflash2 import (
-    DFlash2Qwen3Model,
-    _grouped_conv,
-    _score_edges,
-)
 from vllm.model_executor.models.dflash2_sm75 import (
     Sm75DFlash2ResidualNorm,
     encode_dflash2_mlp_sm75,
     restore_dflash2_mlp_sm75,
     should_enable_dflash2_sm75,
+    synchronize_dflash2_mlp_scales,
+)
+from vllm.model_executor.models.qwen3_dflash2 import (
+    DFlash2Qwen3Model,
+    _grouped_conv,
+    _score_edges,
 )
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
@@ -191,6 +192,22 @@ def test_sm75_dflash2_restore_matches_row_scale_contract():
     expected = output.float() * (scales[:, None] / 256.0)
 
     torch.testing.assert_close(actual, expected.to(torch.float16))
+
+
+def test_sm75_dflash2_tp_scales_share_one_reduction_domain(monkeypatch):
+    payload = torch.tensor([[2.0, -4.0], [1.0, 3.0]], dtype=torch.float16)
+    scales = torch.tensor([2.0, 8.0], dtype=torch.float32)
+
+    monkeypatch.setattr(
+        "vllm.model_executor.models.dflash2_sm75.tensor_model_parallel_all_gather",
+        lambda value, dim=0: torch.cat((value, value * 2), dim=dim),
+    )
+    actual_payload, actual_scales = synchronize_dflash2_mlp_scales(
+        payload, scales, tp_size=2
+    )
+
+    torch.testing.assert_close(actual_scales, torch.tensor([4.0, 16.0]))
+    torch.testing.assert_close(actual_payload, payload * 0.5)
 
 
 def test_sm75_dflash2_rmsnorm_uses_fp32_residual_and_bf16_boundaries():
