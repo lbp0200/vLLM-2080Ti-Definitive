@@ -37,6 +37,7 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
             return False, "requires CUDA."
+
         return True, None
 
     @classmethod
@@ -166,6 +167,20 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
             return False, "requires CUDA."
+
+        # The SM75 CUTLASS build only exposes the INT8 path. In particular,
+        # ``cutlass_scaled_mm`` still validates its input as int8 on SM75, so
+        # allowing FP8 layers here causes a late profile-time dtype assertion
+        # instead of selecting the Marlin FP8 fallback. Query the compiled
+        # operator rather than using ``supports_fp8()``: Turing can execute
+        # Marlin FP8 weight-only GEMMs but has no native FP8 scaled-MM op.
+        if compute_capability is None:
+            capability = current_platform.get_device_capability()
+            compute_capability = capability.to_int() if capability is not None else None
+        if compute_capability is None or not ops.cutlass_scaled_mm_supports_fp8(
+            compute_capability
+        ):
+            return False, "requires a CUDA capability supported by CUTLASS FP8 scaled-MM."
         return True, None
 
     @classmethod

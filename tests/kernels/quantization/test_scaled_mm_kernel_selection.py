@@ -21,6 +21,9 @@ from vllm.model_executor.kernels.linear import (
     init_int8_linear_kernel,
     register_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFP8ScaledMMLinearKernel,
+)
 from vllm.platforms import PlatformEnum
 
 pytestmark = pytest.mark.cpu_test
@@ -48,6 +51,29 @@ def test_cpu_kernel_implements_is_supported():
     result, reason = CPUInt8ScaledMMLinearKernel.is_supported()
     assert isinstance(result, bool), "is_supported() should return a bool"
     assert reason is None or isinstance(reason, str), "reason should be str or None"
+
+
+@pytest.mark.parametrize(
+    ("capability", "compiled_support", "expected"),
+    [(75, False, False), (80, True, True)],
+)
+def test_cutlass_fp8_respects_compiled_capability(
+    capability, compiled_support, expected
+):
+    """CUTLASS FP8 must reject SM75 and follow the compiled dispatch table."""
+    with (
+        patch(
+            "vllm.model_executor.kernels.linear.scaled_mm.cutlass.current_platform"
+        ) as platform,
+        patch(
+            "vllm.model_executor.kernels.linear.scaled_mm.cutlass.ops.cutlass_scaled_mm_supports_fp8",
+            return_value=compiled_support,
+        ),
+    ):
+        platform.is_cuda.return_value = True
+        supported, _ = CutlassFP8ScaledMMLinearKernel.is_supported(capability)
+
+    assert supported is expected
 
 
 def test_aiter_kernel_implements_is_supported():
