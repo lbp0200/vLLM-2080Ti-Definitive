@@ -661,9 +661,24 @@ class Scheduler(SchedulerInterface):
                 frontier_width = sum(
                     r == prefill_frontier for r in remaining_prompts
                 )
-                prefill_frontier_step = min(
-                    prefill_frontier - next_frontier,
-                    max(token_budget // frontier_width, 1),
+                # A cohort step below one block quantum cannot fund a
+                # block-aligned chunk: `_mamba_block_aligned_split` clips such a
+                # chunk back to its start and returns 0, `num_new_tokens` stays
+                # 0 for every peer, and the frontier then repeats forever with an
+                # empty step (running>0, waiting=0, GPUs idle). Floor the step at
+                # one quantum when the align split is active so the frontier
+                # peer always advances.
+                min_frontier_step = (
+                    self.cache_config.block_size
+                    if self.need_mamba_block_aligned_split
+                    else 1
+                )
+                prefill_frontier_step = max(
+                    min(
+                        prefill_frontier - next_frontier,
+                        token_budget // frontier_width,
+                    ),
+                    min_frontier_step,
                 )
                 threshold = self.scheduler_config.long_prefill_token_threshold
                 if threshold > 0:
