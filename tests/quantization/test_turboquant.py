@@ -867,8 +867,11 @@ class TestTurboQuantMixedBatch:
             output[decode_tokens:], torch.full((prefill_tokens, 2), 2.0)
         )
 
-    def test_pure_spec_batch_keeps_compressed_verifier_route(self, monkeypatch):
-        """Pure MTP continuations must not take the mixed raw-K/V route."""
+    @pytest.mark.parametrize("force_spec_decode", [False, True])
+    def test_pure_spec_batch_uses_raw_verifier_fastpath(
+        self, monkeypatch, force_spec_decode
+    ):
+        """Pure and mixed MTP must use the same raw-current verifier math."""
         from vllm.v1.attention.backends import turboquant_attn
 
         impl = object.__new__(turboquant_attn.TurboQuantAttentionImpl)
@@ -890,6 +893,7 @@ class TestTurboQuantMixedBatch:
             is_prefill=True,
             num_decodes=2,
             num_decode_tokens=8,
+            force_spec_decode=force_spec_decode,
         )
         layer = SimpleNamespace(
             _tq_Pi=torch.empty(0),
@@ -900,16 +904,23 @@ class TestTurboQuantMixedBatch:
 
         monkeypatch.setattr(impl, "_ensure_on_device", lambda *_args: None)
 
-        def fake_spec_decode(query, kv_cache, received_metadata, *args):
-            calls.append((query, received_metadata))
+        def fail_compressed_spec_decode(*_args, **_kwargs):
+            raise AssertionError("pure spec fastpath reread compressed verifier K/V")
+
+        def fake_raw_spec_decode(
+            query, key, value, kv_cache, received_metadata, *args
+        ):
+            calls.append((query, key, value, received_metadata))
             return torch.full_like(query, 1)
 
-        def fail_raw_spec_decode(*_args, **_kwargs):
-            raise AssertionError("pure spec batch used mixed raw-K/V route")
-
-        monkeypatch.setattr(impl, "_spec_decode_attention", fake_spec_decode)
         monkeypatch.setattr(
-            impl, "_spec_decode_attention_raw_current", fail_raw_spec_decode
+            turboquant_attn, "_SPEC_CONTINUATION_DECODE_FASTPATH", True
+        )
+        monkeypatch.setattr(
+            impl, "_spec_decode_attention", fail_compressed_spec_decode
+        )
+        monkeypatch.setattr(
+            impl, "_spec_decode_attention_raw_current", fake_raw_spec_decode
         )
 
         output = impl.forward(
@@ -918,8 +929,67 @@ class TestTurboQuantMixedBatch:
 
         assert len(calls) == 1
         assert calls[0][0].shape[0] == 8
-        assert calls[0][1] is metadata
+        assert calls[0][1].shape == (8, 1, 2)
+        assert calls[0][2].shape == (8, 1, 2)
+        assert calls[0][3] is metadata
         assert metadata.query_start_loc_cpu.tolist() == [0, 4, 8]
+        torch.testing.assert_close(output, torch.ones_like(output))
+
+    @pytest.mark.parametrize("force_spec_decode", [False, True])
+    def test_pure_spec_batch_keeps_compressed_route_without_fastpath(
+        self, monkeypatch, force_spec_decode
+    ):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        impl = object.__new__(turboquant_attn.TurboQuantAttentionImpl)
+        impl.num_heads = 1
+        impl.num_kv_heads = 1
+        impl.head_size = 2
+        metadata = turboquant_attn.TurboQuantMetadata(
+            seq_lens=torch.tensor([128], dtype=torch.int32),
+            slot_mapping=torch.arange(4, dtype=torch.int64),
+            block_table=torch.zeros(1, 1, dtype=torch.int32),
+            query_start_loc=torch.tensor([0, 4], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 4], dtype=torch.int32),
+            num_actual_tokens=4,
+            max_query_len=4,
+            max_seq_len=128,
+            is_prefill=True,
+            num_decodes=1,
+            num_decode_tokens=4,
+            force_spec_decode=force_spec_decode,
+        )
+        layer = SimpleNamespace(
+            _tq_Pi=torch.empty(0),
+            _tq_PiT=torch.empty(0),
+            _tq_centroids=torch.empty(0),
+        )
+        monkeypatch.setattr(impl, "_ensure_on_device", lambda *_args: None)
+        monkeypatch.setattr(
+            turboquant_attn, "_SPEC_CONTINUATION_DECODE_FASTPATH", False
+        )
+        monkeypatch.setattr(
+            impl,
+            "_spec_decode_attention",
+            lambda query, *_args: torch.ones_like(query),
+        )
+        monkeypatch.setattr(
+            impl,
+            "_spec_decode_attention_raw_current",
+            lambda *_args: (_ for _ in ()).throw(
+                AssertionError("raw-current route ignored the disabled fastpath")
+            ),
+        )
+
+        output = impl.forward(
+            layer,
+            torch.zeros(4, 2),
+            torch.zeros(4, 2),
+            torch.zeros(4, 2),
+            torch.zeros(1, 1, 1, 1),
+            metadata,
+        )
+
         torch.testing.assert_close(output, torch.ones_like(output))
 
 

@@ -1154,9 +1154,19 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         num_decode_tokens = attn_metadata.num_decode_tokens
 
         if attn_metadata.force_spec_decode:
-            attn_out = self._spec_decode_attention(
-                q, kv_cache, attn_metadata, Pi, centroids, PiT
-            )
+            if (
+                _SPEC_CONTINUATION_DECODE_FASTPATH
+                and attn_metadata.max_query_len > 1
+            ):
+                k = key[:N].view(N, self.num_kv_heads, self.head_size)
+                v = value[:N].view(N, self.num_kv_heads, self.head_size)
+                attn_out = self._spec_decode_attention_raw_current(
+                    q, k, v, kv_cache, attn_metadata, Pi, centroids, PiT
+                )
+            else:
+                attn_out = self._spec_decode_attention(
+                    q, kv_cache, attn_metadata, Pi, centroids, PiT
+                )
         elif not attn_metadata.is_prefill:
             # Pure decode batch — fast path
             attn_out = self._decode_attention(
@@ -1182,9 +1192,16 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             # prefill tail even though its query length is greater than one.
             # Each query needs an incrementing sequence length for causal
             # attention, so it cannot use the regular decode path directly.
-            attn_out = self._spec_decode_attention(
-                q, kv_cache, attn_metadata, Pi, centroids, PiT
-            )
+            if _SPEC_CONTINUATION_DECODE_FASTPATH:
+                k = key[:N].view(N, self.num_kv_heads, self.head_size)
+                v = value[:N].view(N, self.num_kv_heads, self.head_size)
+                attn_out = self._spec_decode_attention_raw_current(
+                    q, k, v, kv_cache, attn_metadata, Pi, centroids, PiT
+                )
+            else:
+                attn_out = self._spec_decode_attention(
+                    q, kv_cache, attn_metadata, Pi, centroids, PiT
+                )
         else:
             # Mixed batch: decodes first (guaranteed by reorder_batch).
             attn_out = torch.empty(
@@ -1359,10 +1376,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
     ) -> torch.Tensor:
         """Run a multi-token speculative continuation as causal decodes.
 
-        This is the full CUDA-Graph route used by the SM75 fast profile. The
-        candidate K/V entries have already been written to the TurboQuant
-        cache, so one B=q_len compressed-cache launch preserves the validated
-        graph topology for ordinary, non-mixed speculative decode.
+        This compressed-cache implementation remains available when the
+        raw-current continuation fastpath is explicitly disabled.
         """
         qsl_cpu = attn_metadata.query_start_loc_cpu
         qsl = (
@@ -1431,13 +1446,13 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         centroids: torch.Tensor,
         PiT: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Run mixed-batch speculative decode with raw current K/V.
+        """Run speculative continuation decode with raw current K/V.
 
         The cache update precedes attention. The just-written verifier chunk is
         lossy in TurboQuant, so a request interrupted by late prefill attends to
         the committed prefix from TQ and the current verifier chunk from raw
-        K/V. Ordinary speculative decode remains on the established compressed
-        cache graph path above.
+        K/V. Pure and mixed MTP batches must use this same attention math to
+        avoid changing verifier logits when a late prefill joins the batch.
         """
         qsl_cpu = attn_metadata.query_start_loc_cpu
         qsl = (
