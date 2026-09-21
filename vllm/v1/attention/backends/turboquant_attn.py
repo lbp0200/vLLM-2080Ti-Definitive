@@ -801,12 +801,13 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         """Build TurboQuantMetadata from common attention metadata."""
         cam = common_attn_metadata
 
-        # With reorder_batch_threshold=1, the model runner guarantees
-        # decodes come first in the batch. split_decodes_and_prefills
-        # finds the boundary (operates on CPU tensors — no GPU sync).
+        # The model runner guarantees decodes come first. Keep short requests
+        # still in prefill on the prefill side when that state is available.
         assert self.reorder_batch_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
-            cam, decode_threshold=self.reorder_batch_threshold
+            cam,
+            decode_threshold=self.reorder_batch_threshold,
+            treat_short_extends_as_decodes=cam.is_prefilling is None,
         )
         (
             first_chunk_wrapper,
@@ -1183,35 +1184,55 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
             # --- Decode portion (first num_decodes requests) ---
             # Use full-batch max_seq_len as safe upper bound (no GPU sync).
+            decode_qsl_cpu = (
+                attn_metadata.query_start_loc_cpu[: num_decodes + 1]
+                if attn_metadata.query_start_loc_cpu is not None
+                else None
+            )
+            decode_qsl = attn_metadata.query_start_loc[: num_decodes + 1]
+            if decode_qsl_cpu is not None:
+                decode_max_query_len = int(
+                    (decode_qsl_cpu[1:] - decode_qsl_cpu[:-1]).max()
+                )
+            else:
+                decode_max_query_len = int(
+                    (decode_qsl[1:] - decode_qsl[:-1]).max().item()
+                )
             decode_meta = TurboQuantMetadata(
                 seq_lens=attn_metadata.seq_lens[:num_decodes],
                 slot_mapping=attn_metadata.slot_mapping[:num_decode_tokens],
                 block_table=attn_metadata.block_table[:num_decodes],
-                query_start_loc=attn_metadata.query_start_loc[: num_decodes + 1],
+                query_start_loc=decode_qsl,
                 num_actual_tokens=num_decode_tokens,
-                max_query_len=1,
+                max_query_len=decode_max_query_len,
                 max_seq_len=attn_metadata.max_seq_len,
                 is_prefill=False,
-                query_start_loc_cpu=(
-                    attn_metadata.query_start_loc_cpu[: num_decodes + 1]
-                    if attn_metadata.query_start_loc_cpu is not None
-                    else None
-                ),
+                query_start_loc_cpu=decode_qsl_cpu,
                 seq_lens_cpu=(
                     attn_metadata.seq_lens_cpu[:num_decodes]
                     if attn_metadata.seq_lens_cpu is not None
                     else None
                 ),
             )
-            attn_out[:num_decode_tokens] = self._decode_attention(
-                q[:num_decode_tokens],
-                kv_cache,
-                decode_meta,
-                Pi,
-                centroids,
-                PiT,
-                layer,
-            )
+            if decode_max_query_len > 1:
+                attn_out[:num_decode_tokens] = self._spec_decode_attention(
+                    q[:num_decode_tokens],
+                    kv_cache,
+                    decode_meta,
+                    Pi,
+                    centroids,
+                    PiT,
+                )
+            else:
+                attn_out[:num_decode_tokens] = self._decode_attention(
+                    q[:num_decode_tokens],
+                    kv_cache,
+                    decode_meta,
+                    Pi,
+                    centroids,
+                    PiT,
+                    layer,
+                )
 
             # --- Prefill portion (remaining requests) ---
             # CRITICAL: use prefill-specific max_seq_len so flash_attn's
@@ -1234,13 +1255,21 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 prefill_qsl_cpu = (
                     attn_metadata.query_start_loc_cpu[num_decodes:] - num_decode_tokens
                 )
+            prefill_query_start_loc = (
+                prefill_qsl_cpu if prefill_qsl_cpu is not None else prefill_qsl
+            )
+            prefill_max_query_len = int(
+                (prefill_query_start_loc[1:] - prefill_query_start_loc[:-1])
+                .max()
+                .item()
+            )
             prefill_meta = TurboQuantMetadata(
                 seq_lens=prefill_seq_lens,
                 slot_mapping=attn_metadata.slot_mapping[num_decode_tokens:N],
                 block_table=attn_metadata.block_table[num_decodes:],
                 query_start_loc=prefill_qsl,
                 num_actual_tokens=N - num_decode_tokens,
-                max_query_len=attn_metadata.max_query_len,
+                max_query_len=prefill_max_query_len,
                 max_seq_len=prefill_max_seq,
                 is_prefill=True,
                 query_start_loc_cpu=prefill_qsl_cpu,
