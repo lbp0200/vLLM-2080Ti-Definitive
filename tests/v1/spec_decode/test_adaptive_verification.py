@@ -112,6 +112,49 @@ def test_manager_scopes_varlen_check_without_weakening_runner_cg_mode(monkeypatc
     assert runner_support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
 
 
+def test_manager_rejects_turboquant_device_cpu_query_lens_mismatch():
+    """TurboQuant plans request slices from CPU query boundaries."""
+    from vllm.v1.attention.backends.turboquant_attn import (
+        TurboQuantAttentionBackend,
+    )
+
+    assert (
+        TurboQuantAttentionBackend.supports_device_cpu_query_lens_mismatch()
+        is False
+    )
+
+    class Builder:
+        @staticmethod
+        def get_cudagraph_support(*_args):
+            # Isolate the query-boundary capability gate from TurboQuant's
+            # current UNIFORM_BATCH CUDA Graph limitation.
+            return AttentionCGSupport.ALWAYS
+
+    group = SimpleNamespace(
+        layer_names=["target"],
+        backend=TurboQuantAttentionBackend,
+        kv_cache_spec=None,
+        get_metadata_builder=lambda _index: Builder(),
+    )
+    support = AttentionCGSupportInfo(AttentionCGSupport.ALWAYS, None)
+
+    with pytest.raises(
+        ValueError,
+        match="TurboQuantAttentionBackend.*does not support",
+    ):
+        maybe_create_adaptive_verification_manager(
+            enable_adaptive_verification=True,
+            attn_groups=[[group]],
+            attn_cg_support=support,
+            req_states=object(),
+            query_start_loc=object(),
+            num_bonus_tokens=1,
+            max_total_logits=1,
+            vllm_config=None,
+            target_layer_names={"target"},
+        )
+
+
 def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():
     # Verification is cheap up to two extra tokens, then jumps 100x; only the
     # highest-confidence draft is worth the cheap slot.

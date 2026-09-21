@@ -867,6 +867,61 @@ class TestTurboQuantMixedBatch:
             output[decode_tokens:], torch.full((prefill_tokens, 2), 2.0)
         )
 
+    def test_pure_spec_batch_keeps_compressed_verifier_route(self, monkeypatch):
+        """Pure MTP continuations must not take the mixed raw-K/V route."""
+        from vllm.v1.attention.backends import turboquant_attn
+
+        impl = object.__new__(turboquant_attn.TurboQuantAttentionImpl)
+        impl.num_heads = 1
+        impl.num_kv_heads = 1
+        impl.head_size = 2
+        query = torch.zeros(8, 2)
+        key = torch.zeros_like(query)
+        value = torch.zeros_like(query)
+        metadata = turboquant_attn.TurboQuantMetadata(
+            seq_lens=torch.tensor([128, 129], dtype=torch.int32),
+            slot_mapping=torch.arange(8, dtype=torch.int64),
+            block_table=torch.zeros(2, 1, dtype=torch.int32),
+            query_start_loc=torch.tensor([0, 4, 8], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 4, 8], dtype=torch.int32),
+            num_actual_tokens=8,
+            max_query_len=4,
+            max_seq_len=129,
+            is_prefill=True,
+            num_decodes=2,
+            num_decode_tokens=8,
+        )
+        layer = SimpleNamespace(
+            _tq_Pi=torch.empty(0),
+            _tq_PiT=torch.empty(0),
+            _tq_centroids=torch.empty(0),
+        )
+        calls = []
+
+        monkeypatch.setattr(impl, "_ensure_on_device", lambda *_args: None)
+
+        def fake_spec_decode(query, kv_cache, received_metadata, *args):
+            calls.append((query, received_metadata))
+            return torch.full_like(query, 1)
+
+        def fail_raw_spec_decode(*_args, **_kwargs):
+            raise AssertionError("pure spec batch used mixed raw-K/V route")
+
+        monkeypatch.setattr(impl, "_spec_decode_attention", fake_spec_decode)
+        monkeypatch.setattr(
+            impl, "_spec_decode_attention_raw_current", fail_raw_spec_decode
+        )
+
+        output = impl.forward(
+            layer, query, key, value, torch.zeros(1, 1, 1, 1), metadata
+        )
+
+        assert len(calls) == 1
+        assert calls[0][0].shape[0] == 8
+        assert calls[0][1] is metadata
+        assert metadata.query_start_loc_cpu.tolist() == [0, 4, 8]
+        torch.testing.assert_close(output, torch.ones_like(output))
+
 
 # ============================================================================
 # Centroids tests (CPU-only)

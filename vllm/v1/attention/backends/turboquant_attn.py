@@ -405,6 +405,14 @@ class TurboQuantAttentionBackend(AttentionBackend):
     def supports_per_head_quant_scales(cls) -> bool:
         return False
 
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # Per-request speculative decode slices are planned from CPU query
+        # boundaries. Adaptive verification can redistribute verifier rows
+        # only in the device boundaries, which would pair rows with another
+        # request's sequence length and block table.
+        return False
+
     @staticmethod
     def get_impl_cls() -> type["TurboQuantAttentionImpl"]:
         return TurboQuantAttentionImpl
