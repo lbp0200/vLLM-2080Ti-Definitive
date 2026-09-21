@@ -355,6 +355,28 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
+        if (
+            self.prefill_batch_barrier
+            and self.need_mamba_block_aligned_split
+            and self.max_num_scheduled_tokens
+            < self.max_num_running_reqs * self.cache_config.block_size
+        ):
+            # The barrier only keeps peers together while their final chunks fit
+            # in one step. Below one block quantum per peer that is not always
+            # possible, so the cohort may cross the prompt boundary one block
+            # apart; say so instead of failing silently.
+            logger.warning_once(
+                "prefill_batch_barrier cannot keep peer first tokens together "
+                "with mamba cache mode 'align': max_num_scheduled_tokens=%d is "
+                "below one block quantum per peer (%d x %d). Peers whose final "
+                "chunks together exceed one step budget enter decode up to one "
+                "block apart. Raise max_num_batched_tokens to at least %d or "
+                "drop --prefill-batch-barrier.",
+                self.max_num_scheduled_tokens,
+                self.max_num_running_reqs,
+                self.cache_config.block_size,
+                self.max_num_running_reqs * self.cache_config.block_size,
+            )
         # TODO: Support models with multiple Mamba specs that require different
         # prefill checkpoint alignments instead of selecting the first one.
         self.mamba_prefill_checkpoint_alignment = next(
@@ -661,13 +683,10 @@ class Scheduler(SchedulerInterface):
                 frontier_width = sum(
                     r == prefill_frontier for r in remaining_prompts
                 )
-                # A cohort step below one block quantum cannot fund a
-                # block-aligned chunk: `_mamba_block_aligned_split` clips such a
-                # chunk back to its start and returns 0, `num_new_tokens` stays
-                # 0 for every peer, and the frontier then repeats forever with an
-                # empty step (running>0, waiting=0, GPUs idle). Floor the step at
-                # one quantum when the align split is active so the frontier
-                # peer always advances.
+                # Cohort steps must stay fundable by the align split: a step
+                # below one block quantum is clipped back to the chunk start,
+                # which leaves every peer with num_new_tokens == 0 and repeats
+                # the same frontier indefinitely.
                 min_frontier_step = (
                     self.cache_config.block_size
                     if self.need_mamba_block_aligned_split

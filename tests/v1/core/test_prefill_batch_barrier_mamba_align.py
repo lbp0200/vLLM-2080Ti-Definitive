@@ -1,17 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The prefill batch barrier must not livelock on hybrid mamba "align" models.
+"""Prefill batch barrier must not livelock with mamba cache mode "align".
 
-Live evidence (T10 4x Tesla T10, 2026-09-21, Qwen3.5-27B FP8 + MTP, mamba block
-1600, `max_num_batched_tokens=2048`, `max_num_seqs=2`, `--prefill-batch-barrier`):
-two 32768-token prompts reached `num_computed_tokens == 3200` together, the
-barrier split `2048 // 2 = 1024` tokens per peer, `_mamba_block_aligned_split`
-clipped each chunk back to its block start and returned 0, and the scheduler then
-produced an empty step forever with `num_requests_running == 2`, `waiting == 0`
-and four idle GPUs. py-spy locals captured inside the live `schedule()`:
-
-    prefill_frontier_step: 1024          remaining_prompts: [29568, 29568]
-    barrier_has_running_prefill: True    num_scheduled_tokens: {}
+The barrier hands each peer `token_budget // cohort_width` tokens. With the
+align split a step below one block quantum is clipped back to the chunk start,
+so every peer ends up with 0 scheduled tokens and the frontier repeats forever.
 """
 
 import os
@@ -134,12 +127,7 @@ def _build_scheduler(
 
 
 def _request(request_id: str, prompt_len: int) -> Request:
-    """Two requests must not share a prefix, or one skips its prefill entirely.
-
-    The live repro used a unique `--prompt-variant` per request for the same
-    reason: with an identical prompt the second request resumes from the prefix
-    cache and the barrier cohort never forms.
-    """
+    """Distinct prompts: an identical one resumes from the prefix cache."""
     init_none_hash(sha256)
     block_hasher = get_request_block_hasher(ATTN_BLOCK, sha256)
     sampling_params = SamplingParams(max_tokens=16, ignore_eos=True)
@@ -228,3 +216,41 @@ def test_prefill_batch_barrier_mamba_align_survives_equal_frontier():
     output = scheduler.schedule()
     assert output.num_scheduled_tokens, "peers at an equal frontier scheduled nothing"
     assert max(output.num_scheduled_tokens.values()) >= MAMBA_BLOCK
+
+
+def test_prefill_batch_barrier_mamba_align_tail_skew_is_bounded():
+    """A cohort whose final chunks exceed one step crosses one block apart.
+
+    Two peers with equal 1500-token tails cannot both cross the prompt boundary
+    inside a 2048-token step, and the align split cannot hand either peer a
+    smaller mid-prompt chunk either. The scheduler keeps making progress and the
+    skew stays at one step; this configuration is warned about at startup.
+    """
+    scheduler = _build_scheduler()
+    requests = [_request("r0", 4700), _request("r1", 4700)]
+    scheduler.add_request(requests[0])
+    for _ in range(2):  # r0 reaches 3200 -> 1500 tokens left
+        output = scheduler.schedule()
+        scheduler.update_from_output(output, _model_output(scheduler, output))
+    assert requests[0].num_computed_tokens == 3200
+
+    scheduler.add_request(requests[1])
+    finished_at: dict[str, int] = {}
+    empty_streak = longest_empty = 0
+    for step in range(200):
+        output = scheduler.schedule()
+        if output.num_scheduled_tokens:
+            empty_streak = 0
+            scheduler.update_from_output(output, _model_output(scheduler, output))
+        elif scheduler.running:
+            empty_streak += 1
+            longest_empty = max(longest_empty, empty_streak)
+        for request in requests:
+            if request.request_id not in finished_at and not request.is_prefill_chunk:
+                finished_at[request.request_id] = step
+        if len(finished_at) == len(requests):
+            break
+
+    assert longest_empty < 2, "tail cohort livelocked"
+    assert len(finished_at) == len(requests), f"unfinished peers: {finished_at}"
+    assert abs(finished_at["r0"] - finished_at["r1"]) <= 1, f"skew > 1 step: {finished_at}"
