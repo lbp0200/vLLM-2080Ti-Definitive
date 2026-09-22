@@ -710,6 +710,289 @@ class TestTurboQuantPrefixCombine:
         assert calls[0][1]["qo_indptr"].tolist() == [0, 256]
         assert calls[0][1]["kv_indptr"].tolist() == [0, 256]
 
+
+class TestTurboQuantMixedBatch:
+    @staticmethod
+    def _build_short_late_prefill_metadata(is_prefilling):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        builder = object.__new__(turboquant_attn.TurboQuantMetadataBuilder)
+        builder.reorder_batch_threshold = 4
+        builder._plan_flashinfer_prefill_wrappers = lambda cam, num_decodes: (
+            None,
+            None,
+            None,
+            None,
+        )
+        query_start_loc = torch.tensor([0, 4, 6], dtype=torch.int32)
+        cam = SimpleNamespace(
+            seq_lens=torch.tensor([128, 2], dtype=torch.int32),
+            slot_mapping=torch.arange(6, dtype=torch.int64),
+            block_table_tensor=torch.zeros(2, 1, dtype=torch.int32),
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc,
+            seq_lens_cpu_upper_bound=torch.tensor([128, 2], dtype=torch.int32),
+            num_reqs=2,
+            num_actual_tokens=6,
+            max_query_len=4,
+            max_seq_len=128,
+            is_prefilling=is_prefilling,
+        )
+        return builder.build(0, cam)
+
+    def test_short_late_prefill_is_not_classified_as_decode(self):
+        metadata = self._build_short_late_prefill_metadata(
+            torch.tensor([False, True])
+        )
+
+        assert metadata.num_decodes == 1
+        assert metadata.num_decode_tokens == 4
+
+    def test_missing_prefill_flags_preserves_legacy_short_extend_classification(self):
+        """DBO/ubatch metadata without flags keeps the legacy split."""
+        metadata = self._build_short_late_prefill_metadata(None)
+
+        assert metadata.num_decodes == 2
+        assert metadata.num_decode_tokens == 6
+
+    @pytest.mark.parametrize(
+        ("decode_query_lens", "prefill_tokens", "expected_route"),
+        [
+            ((1,), 8, "decode"),
+            ((4,), 8, "raw_spec"),
+            ((4,), 2, "raw_spec"),
+            ((4, 4), 8, "raw_spec"),
+            ((1, 4), 8, "raw_spec"),
+        ],
+    )
+    def test_mixed_batch_routes_decode_prefix_by_query_width(
+        self, monkeypatch, decode_query_lens, prefill_tokens, expected_route
+    ):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        impl = object.__new__(turboquant_attn.TurboQuantAttentionImpl)
+        impl.num_heads = 1
+        impl.num_kv_heads = 1
+        impl.head_size = 2
+
+        decode_tokens = sum(decode_query_lens)
+        num_decodes = len(decode_query_lens)
+        num_tokens = decode_tokens + prefill_tokens
+        query_start_loc = torch.tensor(
+            [0, *torch.tensor(decode_query_lens).cumsum(0).tolist(), num_tokens],
+            dtype=torch.int32,
+        )
+        metadata = turboquant_attn.TurboQuantMetadata(
+            seq_lens=torch.tensor(
+                [128 + i for i in range(num_decodes)] + [prefill_tokens],
+                dtype=torch.int32,
+            ),
+            slot_mapping=torch.arange(num_tokens, dtype=torch.int64),
+            block_table=torch.arange(num_decodes + 1, dtype=torch.int32).view(-1, 1),
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc,
+            seq_lens_cpu=torch.tensor(
+                [128 + i for i in range(num_decodes)] + [prefill_tokens],
+                dtype=torch.int32,
+            ),
+            num_actual_tokens=num_tokens,
+            max_query_len=prefill_tokens,
+            max_seq_len=128 + num_decodes - 1,
+            is_prefill=True,
+            num_decodes=num_decodes,
+            num_decode_tokens=decode_tokens,
+        )
+        layer = SimpleNamespace(
+            _tq_Pi=torch.empty(0),
+            _tq_PiT=torch.empty(0),
+            _tq_centroids=torch.empty(0),
+        )
+        query = torch.zeros(num_tokens, 2)
+        key = torch.zeros_like(query)
+        value = torch.zeros_like(query)
+        kv_cache = torch.zeros(1, 1, 1, 1)
+        calls = []
+
+        monkeypatch.setattr(impl, "_ensure_on_device", lambda layer, device: None)
+
+        def fake_decode(query, kv_cache, metadata, *args):
+            calls.append(("decode", query.shape[0], metadata))
+            return torch.full_like(query, 1)
+
+        def fake_spec_decode(query, kv_cache, metadata, *args):
+            calls.append(("compressed_spec", query.shape[0], metadata))
+            return torch.full_like(query, 1)
+
+        def fake_raw_spec_decode(query, key, value, kv_cache, metadata, *args):
+            calls.append(("raw_spec", query.shape[0], metadata, key, value))
+            return torch.full_like(query, 1)
+
+        def fake_prefill(query, key, value, kv_cache, metadata, *args, **kwargs):
+            calls.append(("prefill", query.shape[0], metadata))
+            return torch.full_like(query, 2)
+
+        monkeypatch.setattr(impl, "_decode_attention", fake_decode)
+        monkeypatch.setattr(impl, "_spec_decode_attention", fake_spec_decode)
+        monkeypatch.setattr(
+            impl, "_spec_decode_attention_raw_current", fake_raw_spec_decode
+        )
+        monkeypatch.setattr(impl, "_prefill_attention", fake_prefill)
+
+        output = impl.forward(layer, query, key, value, kv_cache, metadata)
+
+        assert [call[0] for call in calls] == [expected_route, "prefill"]
+        decode_meta = calls[0][2]
+        assert calls[0][1] == decode_tokens
+        assert decode_meta.max_query_len == max(decode_query_lens)
+        assert decode_meta.seq_lens.shape == (num_decodes,)
+        assert decode_meta.block_table.shape == (num_decodes, 1)
+        assert decode_meta.slot_mapping.tolist() == list(range(decode_tokens))
+        if expected_route == "raw_spec":
+            assert calls[0][3].shape[0] == decode_tokens
+            assert calls[0][4].shape[0] == decode_tokens
+        assert (
+            decode_meta.query_start_loc_cpu.tolist()
+            == query_start_loc[: num_decodes + 1].tolist()
+        )
+        prefill_meta = calls[1][2]
+        assert calls[1][1] == prefill_tokens
+        assert prefill_meta.max_query_len == prefill_tokens
+        assert prefill_meta.query_start_loc_cpu.tolist() == [0, prefill_tokens]
+        assert prefill_meta.block_table.tolist() == [[num_decodes]]
+        assert prefill_meta.slot_mapping.tolist() == list(
+            range(decode_tokens, num_tokens)
+        )
+        torch.testing.assert_close(output[:decode_tokens], torch.ones(decode_tokens, 2))
+        torch.testing.assert_close(
+            output[decode_tokens:], torch.full((prefill_tokens, 2), 2.0)
+        )
+
+    @pytest.mark.parametrize("force_spec_decode", [False, True])
+    def test_pure_spec_batch_uses_raw_verifier_fastpath(
+        self, monkeypatch, force_spec_decode
+    ):
+        """Pure and mixed MTP must use the same raw-current verifier math."""
+        from vllm.v1.attention.backends import turboquant_attn
+
+        impl = object.__new__(turboquant_attn.TurboQuantAttentionImpl)
+        impl.num_heads = 1
+        impl.num_kv_heads = 1
+        impl.head_size = 2
+        query = torch.zeros(8, 2)
+        key = torch.zeros_like(query)
+        value = torch.zeros_like(query)
+        metadata = turboquant_attn.TurboQuantMetadata(
+            seq_lens=torch.tensor([128, 129], dtype=torch.int32),
+            slot_mapping=torch.arange(8, dtype=torch.int64),
+            block_table=torch.zeros(2, 1, dtype=torch.int32),
+            query_start_loc=torch.tensor([0, 4, 8], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 4, 8], dtype=torch.int32),
+            num_actual_tokens=8,
+            max_query_len=4,
+            max_seq_len=129,
+            is_prefill=True,
+            num_decodes=2,
+            num_decode_tokens=8,
+            force_spec_decode=force_spec_decode,
+        )
+        layer = SimpleNamespace(
+            _tq_Pi=torch.empty(0),
+            _tq_PiT=torch.empty(0),
+            _tq_centroids=torch.empty(0),
+        )
+        calls = []
+
+        monkeypatch.setattr(impl, "_ensure_on_device", lambda *_args: None)
+
+        def fail_compressed_spec_decode(*_args, **_kwargs):
+            raise AssertionError("pure spec fastpath reread compressed verifier K/V")
+
+        def fake_raw_spec_decode(
+            query, key, value, kv_cache, received_metadata, *args
+        ):
+            calls.append((query, key, value, received_metadata))
+            return torch.full_like(query, 1)
+
+        monkeypatch.setattr(
+            turboquant_attn, "_SPEC_CONTINUATION_DECODE_FASTPATH", True
+        )
+        monkeypatch.setattr(
+            impl, "_spec_decode_attention", fail_compressed_spec_decode
+        )
+        monkeypatch.setattr(
+            impl, "_spec_decode_attention_raw_current", fake_raw_spec_decode
+        )
+
+        output = impl.forward(
+            layer, query, key, value, torch.zeros(1, 1, 1, 1), metadata
+        )
+
+        assert len(calls) == 1
+        assert calls[0][0].shape[0] == 8
+        assert calls[0][1].shape == (8, 1, 2)
+        assert calls[0][2].shape == (8, 1, 2)
+        assert calls[0][3] is metadata
+        assert metadata.query_start_loc_cpu.tolist() == [0, 4, 8]
+        torch.testing.assert_close(output, torch.ones_like(output))
+
+    @pytest.mark.parametrize("force_spec_decode", [False, True])
+    def test_pure_spec_batch_keeps_compressed_route_without_fastpath(
+        self, monkeypatch, force_spec_decode
+    ):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        impl = object.__new__(turboquant_attn.TurboQuantAttentionImpl)
+        impl.num_heads = 1
+        impl.num_kv_heads = 1
+        impl.head_size = 2
+        metadata = turboquant_attn.TurboQuantMetadata(
+            seq_lens=torch.tensor([128], dtype=torch.int32),
+            slot_mapping=torch.arange(4, dtype=torch.int64),
+            block_table=torch.zeros(1, 1, dtype=torch.int32),
+            query_start_loc=torch.tensor([0, 4], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 4], dtype=torch.int32),
+            num_actual_tokens=4,
+            max_query_len=4,
+            max_seq_len=128,
+            is_prefill=True,
+            num_decodes=1,
+            num_decode_tokens=4,
+            force_spec_decode=force_spec_decode,
+        )
+        layer = SimpleNamespace(
+            _tq_Pi=torch.empty(0),
+            _tq_PiT=torch.empty(0),
+            _tq_centroids=torch.empty(0),
+        )
+        monkeypatch.setattr(impl, "_ensure_on_device", lambda *_args: None)
+        monkeypatch.setattr(
+            turboquant_attn, "_SPEC_CONTINUATION_DECODE_FASTPATH", False
+        )
+        monkeypatch.setattr(
+            impl,
+            "_spec_decode_attention",
+            lambda query, *_args: torch.ones_like(query),
+        )
+        monkeypatch.setattr(
+            impl,
+            "_spec_decode_attention_raw_current",
+            lambda *_args: (_ for _ in ()).throw(
+                AssertionError("raw-current route ignored the disabled fastpath")
+            ),
+        )
+
+        output = impl.forward(
+            layer,
+            torch.zeros(4, 2),
+            torch.zeros(4, 2),
+            torch.zeros(4, 2),
+            torch.zeros(1, 1, 1, 1),
+            metadata,
+        )
+
+        torch.testing.assert_close(output, torch.ones_like(output))
+
+
 # ============================================================================
 # Centroids tests (CPU-only)
 # ============================================================================
@@ -1057,3 +1340,195 @@ class TestStoreDecodeRoundTrip:
             assert cos_sim > threshold, (
                 f"Preset {preset} head {h}: cosine_sim={cos_sim:.4f} < {threshold}"
             )
+
+
+@pytest.mark.skipif(not GPGPU_AVAILABLE, reason="GPGPU not available")
+class TestSpecContinuationMerge:
+    """Numerical regression for raw-KV speculative continuation merge."""
+
+    @pytest.mark.parametrize("empty_prefix", [False, True])
+    def test_matches_fp32_causal_reference(self, empty_prefix):
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_spec_continuation_merge,
+        )
+
+        device = torch.device(DEVICE_TYPE)
+        chunk_len = 8
+        num_kv_heads = 2
+        num_query_heads = 4
+        head_dim = 128
+        scale = 1.0 / math.sqrt(head_dim)
+        torch.manual_seed(20260913)
+        query = torch.randn(
+            chunk_len, num_query_heads, head_dim, device=device, dtype=torch.float16
+        )
+        key = torch.randn(
+            chunk_len, num_kv_heads, head_dim, device=device, dtype=torch.float16
+        )
+        value = torch.randn_like(key)
+        prefix_out = torch.randn_like(query)
+        prefix_lse = torch.randn(
+            chunk_len, num_query_heads, device=device, dtype=torch.float32
+        )
+        if empty_prefix:
+            prefix_out.zero_()
+            prefix_lse.fill_(float("-inf"))
+
+        result = triton_turboquant_spec_continuation_merge(
+            query, key, value, prefix_out, prefix_lse, scale
+        )
+
+        kv_group_size = num_query_heads // num_kv_heads
+        scores = (
+            torch.einsum(
+                "thgd,shd->thgs",
+                query.float().view(
+                    chunk_len, num_kv_heads, kv_group_size, head_dim
+                ),
+                key.float(),
+            )
+            * scale
+        )
+        token_idx = torch.arange(chunk_len, device=device)
+        causal = token_idx[:, None] >= token_idx[None, :]
+        scores = scores.masked_fill(~causal[:, None, None, :], float("-inf"))
+        current_lse = torch.logsumexp(scores, dim=-1).reshape(
+            chunk_len, num_query_heads
+        )
+        current_out = torch.einsum(
+            "thgs,shd->thgd", torch.softmax(scores, dim=-1), value.float()
+        ).reshape(chunk_len, num_query_heads, head_dim)
+        merged_lse = torch.logaddexp(prefix_lse, current_lse)
+        expected = (
+            prefix_out.float() * torch.exp(prefix_lse - merged_lse).unsqueeze(-1)
+            + current_out * torch.exp(current_lse - merged_lse).unsqueeze(-1)
+        ).to(torch.float16)
+
+        torch.testing.assert_close(result, expected, rtol=2e-3, atol=2e-3)
+
+        aliased_prefix_out = prefix_out.clone()
+        aliased = triton_turboquant_spec_continuation_merge(
+            query,
+            key,
+            value,
+            aliased_prefix_out,
+            prefix_lse,
+            scale,
+            output=aliased_prefix_out,
+        )
+        assert aliased.data_ptr() == aliased_prefix_out.data_ptr()
+        torch.testing.assert_close(aliased, expected, rtol=2e-3, atol=2e-3)
+
+
+class TestSpecDecodeGraphRoute:
+    def test_uses_raw_current_kv_and_clamps_capture_prefix(self, monkeypatch):
+        """The mixed route must not reread verifier rows from the TQ cache."""
+        from vllm.v1.attention.backends import turboquant_attn
+
+        impl = object.__new__(turboquant_attn.TurboQuantAttentionImpl)
+        captured = []
+
+        def fake_raw_current(
+            query,
+            key,
+            value,
+            kv_cache,
+            block_table,
+            cached_len,
+            Pi,
+            centroids,
+            PiT,
+            arange_cache,
+        ):
+            captured.append((key.clone(), value.clone(), cached_len.clone()))
+            return query + key + value
+
+        monkeypatch.setattr(
+            impl, "_spec_continuation_decode_attention", fake_raw_current
+        )
+
+        query = torch.ones(8, 2, 4, dtype=torch.float16)
+        key = torch.full_like(query, 2)
+        value = torch.full_like(query, 3)
+        metadata = SimpleNamespace(
+            query_start_loc_cpu=torch.tensor([0, 8]),
+            query_start_loc=torch.tensor([0, 8]),
+            seq_lens=torch.tensor([4104]),
+            max_seq_len=4104,
+            max_query_len=8,
+            block_table=torch.zeros(1, 1, dtype=torch.int32),
+        )
+
+        result = impl._spec_decode_attention_raw_current(
+            query, key, value, object(), metadata, None, None, None
+        )
+
+        assert len(captured) == 1
+        torch.testing.assert_close(captured[0][0], key)
+        torch.testing.assert_close(captured[0][1], value)
+        assert captured[0][2].tolist() == [4096]
+        torch.testing.assert_close(result, query + key + value)
+
+        metadata.seq_lens.fill_(1)
+        impl._spec_decode_attention_raw_current(
+            query, key, value, object(), metadata, None, None, None
+        )
+        assert captured[1][2].tolist() == [0]
+
+    def test_tensor_prefix_length_is_materialized_for_decode_kernel(self, monkeypatch):
+        """Triton indexes one seq-len element per verifier row."""
+        from vllm.v1.attention.backends import turboquant_attn
+
+        impl = object.__new__(turboquant_attn.TurboQuantAttentionImpl)
+        impl.scale = 0.5
+        impl.max_num_kv_splits = 4
+        impl.tq_config = SimpleNamespace(
+            key_mse_bits=8,
+            key_packed_size=4,
+            effective_value_quant_bits=4,
+            key_fp8=True,
+            norm_correction=False,
+        )
+        captured = []
+
+        def fake_decode(**kwargs):
+            seq_lens = kwargs["seq_lens"]
+            captured.append(seq_lens)
+            assert seq_lens.is_contiguous()
+            assert seq_lens.untyped_storage().nbytes() >= (
+                seq_lens.numel() * seq_lens.element_size()
+            )
+            kwargs["output_buf"].fill_(1)
+            kwargs["lse_buf"].zero_()
+            return kwargs["output_buf"]
+
+        def fake_merge(query, key, value, prefix_out, prefix_lse, scale, output):
+            return output
+
+        monkeypatch.setattr(turboquant_attn, "_TQ_CUDAGRAPH_SPEC_PREFIX_ROWS", False)
+        monkeypatch.setattr(
+            turboquant_attn, "triton_turboquant_decode_attention", fake_decode
+        )
+        monkeypatch.setattr(
+            turboquant_attn, "triton_turboquant_spec_continuation_merge", fake_merge
+        )
+
+        query = torch.ones(4, 2, 4, dtype=torch.float16)
+        key = torch.ones(4, 1, 4, dtype=torch.float16)
+        value = torch.ones_like(key)
+        result = impl._spec_continuation_decode_attention(
+            query,
+            key,
+            value,
+            object(),
+            torch.zeros(1, 1, dtype=torch.int32),
+            torch.tensor([16], dtype=torch.int32),
+            None,
+            None,
+            None,
+            torch.arange(21, dtype=torch.int32),
+        )
+
+        assert len(captured) == 1
+        assert captured[0].tolist() == [16, 16, 16, 16]
+        torch.testing.assert_close(result, torch.ones_like(query))
