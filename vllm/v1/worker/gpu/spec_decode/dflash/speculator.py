@@ -720,7 +720,14 @@ def _prepare_dflash_inputs_kernel(
             for i in range(num_reqs, max_num_reqs + 1, BLOCK_SIZE):
                 block = i + tl.arange(0, BLOCK_SIZE)
                 mask = block < max_num_reqs + 1
-                tl.store(out_query_start_loc_ptr + block, last_query_end, mask=mask)
+                # FULL graphs capture one fixed-width query row per request
+                # slot. Keep padded rows distinct so their metadata remains
+                # aligned with the captured token layout.
+                tl.store(
+                    out_query_start_loc_ptr + block,
+                    block * num_query_per_req,
+                    mask=mask,
+                )
             for i in range(num_reqs, max_num_reqs, BLOCK_SIZE):
                 block = i + tl.arange(0, BLOCK_SIZE)
                 mask = block < max_num_reqs

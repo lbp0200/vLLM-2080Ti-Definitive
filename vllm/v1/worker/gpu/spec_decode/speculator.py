@@ -41,6 +41,29 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _pad_uniform_query_start_loc(
+    query_start_loc: np.ndarray, num_reqs: int, num_reqs_padded: int
+) -> torch.Tensor:
+    """Extend uniform request rows to the fixed FULL-graph batch shape.
+
+    FULL CUDA graphs capture one equally-sized query row per request slot.  A
+    runtime batch with fewer live requests still needs distinct padding rows;
+    collapsing all padding starts to the last live offset makes attention row
+    metadata disagree with the captured token layout.
+    """
+    result = torch.empty(num_reqs_padded + 1, dtype=torch.int32)
+    result[: num_reqs + 1] = torch.from_numpy(query_start_loc[: num_reqs + 1])
+    if num_reqs_padded > num_reqs:
+        query_width = int(query_start_loc[1] - query_start_loc[0])
+        padding = torch.arange(
+            1,
+            num_reqs_padded - num_reqs + 1,
+            dtype=torch.int32,
+        )
+        result[num_reqs + 1 :] = result[num_reqs] + padding * query_width
+    return result
+
+
 def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
     """Whether the target replaces the drafter's input with its HC residual.
 
@@ -290,11 +313,9 @@ class DraftModelSpeculator(BaseSpeculator):
             if batch_desc.cg_mode == CUDAGraphMode.FULL
             else int(query_start_loc_np[-1])
         )
-        query_start_loc_cpu = torch.empty(num_reqs_padded + 1, dtype=torch.int32)
-        query_start_loc_cpu[: num_reqs + 1] = torch.from_numpy(
-            query_start_loc_np[: num_reqs + 1]
+        query_start_loc_cpu = _pad_uniform_query_start_loc(
+            query_start_loc_np, num_reqs, num_reqs_padded
         )
-        query_start_loc_cpu[num_reqs:] = query_start_loc_cpu[num_reqs]
         max_query_len = int((query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).max())
         block_tables = [
             x[:num_reqs_padded] for x in self.block_tables.input_block_tables

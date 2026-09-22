@@ -11,19 +11,35 @@ in FP32.  It is deliberately a DFlash2-only SM75 path.
 
 from __future__ import annotations
 
+import os
+
 import torch
 from torch import nn
 
+from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.triton_utils import tl, triton
-
 
 _ACTIVATION_GAIN = 32.0
 _RESIDUAL_GAIN = 256.0
 _HALF_PAYLOAD_LIMIT = 32752.0
 
 
+def synchronize_dflash2_mlp_scales(
+    payload: torch.Tensor, scales: torch.Tensor, tp_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Put TP partials in one scale domain before row-parallel reduction."""
+    if tp_size <= 1:
+        return payload, scales
+    gathered_scales = tensor_model_parallel_all_gather(scales, dim=0)
+    shared_scales = gathered_scales.view(tp_size, -1).amax(dim=0)
+    scale_ratio = (scales / shared_scales).to(payload.dtype).unsqueeze(-1)
+    return payload * scale_ratio, shared_scales
+
+
 def should_enable_dflash2_sm75(config: object, runtime_dtype: torch.dtype) -> bool:
     """Select the codec only for the BF16 DFlash2 checkpoint on Turing."""
+    if os.getenv("VLLM_DFLASH2_SM75_TRANSPORT", "1") == "0":
+        return False
     if runtime_dtype is not torch.float16 or not torch.cuda.is_available():
         return False
 
@@ -355,6 +371,9 @@ class Sm75DFlash2MLP(nn.Module):
             gate_up,
             down_projection_l2_bound=self._down_projection_l2_bound,
             accumulation_limit=self._accumulation_limit,
+        )
+        payload, scales = synchronize_dflash2_mlp_scales(
+            payload, scales, int(getattr(self.down_proj, "tp_size", 1))
         )
         projected, _ = self.down_proj(payload)
         return restore_dflash2_mlp_sm75(projected, scales)

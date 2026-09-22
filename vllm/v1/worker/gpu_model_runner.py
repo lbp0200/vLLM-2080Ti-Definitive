@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -1602,6 +1603,18 @@ class GPUModelRunner(
         each sequence, and a shifting is done during the next iteration
         based on the number of accepted tokens.
         """
+        trace_limit = int(os.getenv("VLLM_DFLASH_TRACE_STEPS", "0"))
+        if trace_limit and not getattr(self, "_dflash_trace_guard_logged", False):
+            print(
+                "DFLASH_TRACE_GUARD",
+                {
+                    "speculative": self.speculative_config is not None,
+                    "is_hybrid": self.model_config.is_hybrid,
+                    "architecture": self.model_config.architecture,
+                },
+                flush=True,
+            )
+            self._dflash_trace_guard_logged = True
         if not self.speculative_config or not self.model_config.is_hybrid:
             return
 
@@ -1610,6 +1623,29 @@ class GPUModelRunner(
         # tokens gives us the first -1 position (i.e., number of accepted).
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
+
+        trace_step = getattr(self, "_dflash_trace_step", 0)
+        if trace_step < trace_limit:
+            try:
+                tp_rank = get_tp_group().rank_in_group
+            except Exception:
+                tp_rank = -1
+            print(
+                "DFLASH_SAMPLE_TRACE",
+                {
+                    "step": trace_step,
+                    "tp_rank": tp_rank,
+                    "output_token_ids": output_token_ids.detach().cpu().tolist(),
+                    "accepted": self.num_accepted_tokens.gpu[:num_reqs]
+                    .detach()
+                    .cpu()
+                    .tolist(),
+                    "scheduled_spec": scheduler_output.scheduled_spec_decode_tokens,
+                    "scheduled": scheduler_output.num_scheduled_tokens,
+                },
+                flush=True,
+            )
+            self._dflash_trace_step = trace_step + 1
 
         if self.cache_config.mamba_cache_mode == "align":
             # Fused GPU postprocess: state copies + per-request accepted-token

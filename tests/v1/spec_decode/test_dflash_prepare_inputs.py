@@ -102,6 +102,7 @@ def _run_prepare(
         max_num_reqs,
         max_num_tokens,
         128,
+        128,
         sample_from_anchor=True,
     )
     torch.accelerator.synchronize()
