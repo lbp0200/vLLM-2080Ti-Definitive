@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Backend for GatedDeltaNet attention."""
 
-import os
 from dataclasses import dataclass
 from typing import Literal
 
@@ -23,6 +22,7 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.worker.gpu.spec_decode.utils import get_trace_limit
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -525,7 +525,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
-        trace_limit = int(os.getenv("VLLM_DFLASH_TRACE_STEPS", "0"))
+        trace_limit = get_trace_limit("VLLM_DFLASH_TRACE_STEPS")
         if (
             trace_limit > self._dflash_trace_step
             and os.getenv("LOCAL_RANK", "0") == "0"

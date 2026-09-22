@@ -209,6 +209,7 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import (
 from vllm.v1.spec_decode.step3p5 import Step3p5MTPProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
+from vllm.v1.worker.gpu.spec_decode.utils import get_trace_limit
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
@@ -1603,7 +1604,7 @@ class GPUModelRunner(
         each sequence, and a shifting is done during the next iteration
         based on the number of accepted tokens.
         """
-        trace_limit = int(os.getenv("VLLM_DFLASH_TRACE_STEPS", "0"))
+        trace_limit = get_trace_limit("VLLM_DFLASH_TRACE_STEPS")
         if trace_limit and not getattr(self, "_dflash_trace_guard_logged", False):
             print(
                 "DFLASH_TRACE_GUARD",

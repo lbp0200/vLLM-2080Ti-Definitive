@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from collections.abc import Iterable, Iterator
 from typing import Any
 
@@ -25,6 +24,7 @@ from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
+from vllm.v1.worker.gpu.spec_decode.utils import get_trace_limit
 
 # Cap on the FP32 target-logits buffer materialized by apply_sampling_params.
 # TODO(mgoin): Chunking is a workaround. The rejection kernels already upcast
@@ -312,7 +312,7 @@ class RejectionSampler:
             max_num_logprobs,
         )
 
-        trace_limit = int(os.getenv("VLLM_DFLASH_VERIFIER_TRACE_STEPS", "0"))
+        trace_limit = get_trace_limit("VLLM_DFLASH_VERIFIER_TRACE_STEPS")
         trace_step = getattr(self, "_dflash_verifier_trace_step", 0)
         if trace_step < trace_limit:
             print(

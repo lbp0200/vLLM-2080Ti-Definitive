@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import numpy as np
 import torch
 
@@ -11,6 +12,30 @@ from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 logger = init_logger(__name__)
+
+
+def get_trace_limit(env_name: str) -> int:
+    """Read an optional trace limit without allowing bad config to fail serving."""
+    value = os.getenv(env_name)
+    if value is None:
+        return 0
+    try:
+        limit = int(value)
+    except ValueError:
+        logger.warning_once(
+            "Ignoring invalid %s=%r; expected a non-negative integer.",
+            env_name,
+            value,
+        )
+        return 0
+    if limit < 0:
+        logger.warning_once(
+            "Ignoring invalid %s=%r; expected a non-negative integer.",
+            env_name,
+            value,
+        )
+        return 0
+    return limit
 
 
 def get_pp_safe_draft_load_config(load_config: LoadConfig) -> LoadConfig:
