@@ -716,7 +716,6 @@ def _prepare_dflash_inputs_kernel(
         tl.store(out_seeds_ptr + req_state_idx, tl.load(seeds_ptr + req_state_idx))
         if req_idx == num_reqs - 1:
             # Pad per-request buffers to max_num_reqs for CUDA graph safety.
-            last_query_end = num_reqs * num_query_per_req
             for i in range(num_reqs, max_num_reqs + 1, BLOCK_SIZE):
                 block = i + tl.arange(0, BLOCK_SIZE)
                 mask = block < max_num_reqs + 1
