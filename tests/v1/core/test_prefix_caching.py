@@ -205,15 +205,16 @@ def test_independent_dflash_pools_reuse_target_without_draft_lookup():
     assert manager.allocate_slots(first, len(prompt), 0, computed) is not None
     manager.free(first)
 
+    # Draft KV is rebuilt per admission and must never be published as a
+    # reusable prefix-cache entry. Target KV remains reusable on its own.
     draft_pool = manager.coordinator.block_pools[1]
-    for block_hash in first.block_hashes:
-        draft_pool.cached_block_hash_to_block._cache.pop(
-            make_block_hash_with_group_id(block_hash, 1), None
-        )
+    assert not draft_pool.cached_block_hash_to_block._cache
 
     second = make_request("second", prompt + [999], block_size, sha256)
-    _, hit_tokens, _ = manager.get_computed_blocks(second)
+    computed, hit_tokens, _ = manager.get_computed_blocks(second)
     assert hit_tokens > 0
+    assert manager.allocate_slots(second, second.num_tokens, 0, computed) is not None
+    assert manager.estimate_cached_tokens(second) == hit_tokens
 
 
 HISPARSE_BLOCK_SIZE = 16
@@ -1040,6 +1041,52 @@ def test_mamba_boundary_handoffs_do_not_pin_obsolete_blocks():
         manager.new_step_starts()
 
     assert all(block.ref_cnt == 0 for block in old_blocks[:-1])
+
+
+def test_mamba_align_keeps_hashed_boundary_state_alive():
+    """A target prefix hash must survive align-mode state retirement."""
+    manager = make_kv_cache_manager(
+        KVCacheConfig(
+            num_blocks=16,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["mamba"],
+                    MambaSpec(
+                        block_size=16,
+                        shapes=((1,),),
+                        dtypes=(torch.float32,),
+                        mamba_cache_mode="align",
+                    ),
+                )
+            ],
+        ),
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=16,
+    )
+    request = make_request("hashed", list(range(64)), 16, sha256)
+    assert manager.allocate_slots(request, 16) is not None
+    request.num_computed_tokens = 16
+    manager.cache_blocks(request, 16)
+    block = manager.coordinator.single_type_managers[0].req_to_blocks[
+        request.request_id
+    ][0]
+    assert block.block_hash is not None
+
+    # Exercise the exact retirement path used after a subsequent aligned
+    # allocation. The state block remains hashed, so it must not be replaced
+    # by a null block or removed from the prefix-cache map.
+    mamba_manager = manager.coordinator.single_type_managers[0]
+    mamba_manager.last_state_block_idx[request.request_id] = 0
+    manager.remove_skipped_blocks(request.request_id, 16, 64)
+
+    assert not block.is_null
+    assert block.block_hash is not None
+
+    resumed = make_request("resumed", list(range(64)), 16, sha256)
+    _, num_computed_tokens, _ = manager.get_computed_blocks(resumed)
+    assert num_computed_tokens == 16
 
 
 def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
