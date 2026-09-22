@@ -11,6 +11,8 @@ in FP32.  It is deliberately a DFlash2-only SM75 path.
 
 from __future__ import annotations
 
+import os
+
 import torch
 from torch import nn
 
@@ -36,6 +38,8 @@ def synchronize_dflash2_mlp_scales(
 
 def should_enable_dflash2_sm75(config: object, runtime_dtype: torch.dtype) -> bool:
     """Select the codec only for the BF16 DFlash2 checkpoint on Turing."""
+    if os.getenv("VLLM_DFLASH2_SM75_TRANSPORT", "1") == "0":
+        return False
     if runtime_dtype is not torch.float16 or not torch.cuda.is_available():
         return False
 

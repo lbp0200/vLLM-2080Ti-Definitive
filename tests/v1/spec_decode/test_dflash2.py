@@ -274,6 +274,15 @@ def test_sm75_codec_requires_the_exact_sm75_bf16_fp16_tuple(monkeypatch):
     assert not should_enable_dflash2_sm75(config, torch.float16)
 
 
+def test_sm75_codec_can_be_disabled_for_baseline_comparison(monkeypatch):
+    config = SimpleNamespace(torch_dtype="bfloat16")
+    monkeypatch.setenv("VLLM_DFLASH2_SM75_TRANSPORT", "0")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (7, 5))
+
+    assert not should_enable_dflash2_sm75(config, torch.float16)
+
+
 def test_sm75_codec_accepts_a_dtype_only_checkpoint_config(monkeypatch):
     config = SimpleNamespace(dtype=torch.bfloat16)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)

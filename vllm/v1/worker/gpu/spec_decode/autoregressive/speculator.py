@@ -760,11 +760,15 @@ def _prepare_prefill_inputs_kernel(
     if req_idx == (num_reqs - 1):
         # Reset the current draft step to 0.
         tl.store(draft_current_step_ptr, 0)
-        # Pad query_start_loc for CUDA graphs.
+        # Pad query_start_loc with distinct fixed-width rows for CUDA graphs.
         for i in range(num_reqs, max_num_reqs + 1, BLOCK_SIZE):
             block = i + tl.arange(0, BLOCK_SIZE)
             mask = block < max_num_reqs + 1
-            tl.store(draft_query_start_loc_ptr + block, query_end, mask=mask)
+            tl.store(
+                draft_query_start_loc_ptr + block,
+                query_end + (block - num_reqs) * query_len,
+                mask=mask,
+            )
         # Pad seq_lens for CUDA graphs.
         for i in range(num_reqs, max_num_reqs, BLOCK_SIZE):
             block = i + tl.arange(0, BLOCK_SIZE)

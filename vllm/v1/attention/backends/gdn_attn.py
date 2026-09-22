@@ -22,6 +22,7 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.worker.gpu.spec_decode.utils import get_trace_limit
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -165,6 +166,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             dtype=torch.int32,
             device=device,
         )
+        self._dflash_trace_step = 0
 
     def _build_chunk_metadata(
         self,
@@ -523,6 +525,32 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
+        trace_limit = get_trace_limit("VLLM_DFLASH_TRACE_STEPS")
+        if (
+            trace_limit > self._dflash_trace_step
+            and os.getenv("LOCAL_RANK", "0") == "0"
+            and num_prefills == 0
+        ):
+            def values(tensor: torch.Tensor | None):
+                return None if tensor is None else tensor.detach().cpu().tolist()
+
+            print(
+                "DFLASH_GDN_TRACE",
+                {
+                    "step": self._dflash_trace_step,
+                    "query_start_cpu": values(query_start_loc_cpu),
+                    "query_start_gpu": values(query_start_loc),
+                    "seq_lens": values(m.seq_lens),
+                    "draft_counts_cpu": values(num_decode_draft_tokens_cpu),
+                    "accepted": values(num_accepted_tokens),
+                    "spec_query_start": values(spec_query_start_loc),
+                    "spec_state_indices": values(spec_state_indices_tensor),
+                    "block_table": values(block_table_tensor),
+                    "slot_mapping": values(m.slot_mapping),
+                },
+                flush=True,
+            )
+            self._dflash_trace_step += 1
         return attn_metadata
 
     def build_for_cudagraph_capture(

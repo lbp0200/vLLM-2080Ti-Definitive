@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
+from vllm.v1.worker.gpu.spec_decode.utils import get_trace_limit
 
 # Cap on the FP32 target-logits buffer materialized by apply_sampling_params.
 # TODO(mgoin): Chunking is a workaround. The rejection kernels already upcast
@@ -310,6 +311,26 @@ class RejectionSampler:
             chunk_logit_limit,
             max_num_logprobs,
         )
+
+        trace_limit = get_trace_limit("VLLM_DFLASH_VERIFIER_TRACE_STEPS")
+        trace_step = getattr(self, "_dflash_verifier_trace_step", 0)
+        if trace_step < trace_limit:
+            print(
+                "DFLASH_VERIFIER_TRACE",
+                {
+                    "step": trace_step,
+                    "target_argmax": logits.argmax(dim=-1).detach().cpu().tolist(),
+                    "draft_sampled": draft_sampled.detach().cpu().tolist(),
+                    "positions": pos.detach().cpu().tolist(),
+                    "sampled": sampled.detach().cpu().tolist(),
+                    "num_sampled": num_sampled.detach().cpu().tolist(),
+                    "cu_num_logits": input_batch.cu_num_logits.detach()
+                    .cpu()
+                    .tolist(),
+                },
+                flush=True,
+            )
+            self._dflash_verifier_trace_step = trace_step + 1
 
         num_sampled, num_rejected = get_num_sampled_and_rejected(
             num_sampled,
