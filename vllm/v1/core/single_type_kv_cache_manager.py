@@ -1669,8 +1669,9 @@ class MambaManager(SingleTypeKVCacheManager):
                 <= cdiv(processed_computed_tokens, self.block_size) - 1
             ):
                 blocks = self.req_to_blocks[request_id]
-                if blocks[last_state_block_idx] != self._null_block:
-                    self.block_pool.free_blocks([blocks[last_state_block_idx]])
+                block = blocks[last_state_block_idx]
+                if block != self._null_block:
+                    self.block_pool.free_blocks([block])
                     blocks[last_state_block_idx] = self._null_block
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
@@ -2047,16 +2048,23 @@ class MambaManager(SingleTypeKVCacheManager):
             blocks = self.req_to_blocks[request.request_id]
             assert 0 <= checkpoint_idx < len(blocks)
             checkpoint_block = blocks[checkpoint_idx]
-            if checkpoint_block.block_hash_num_tokens == checkpoint_position:
+            # Some prefill backends can leave the reserved internal-checkpoint
+            # slot null when speculative DFlash admission changes the final
+            # chunk shape.  Do not lose the reusable target state in that
+            # case; fall through and publish the prompt-tail state instead.
+            if checkpoint_block.is_null:
+                checkpoint = None
+            elif checkpoint_block.block_hash_num_tokens == checkpoint_position:
                 return None
-            return self.block_pool.cache_partial_block(
-                request=request,
-                block=checkpoint_block,
-                num_tokens=checkpoint_position,
-                kv_cache_group_id=self.kv_cache_group_id,
-                block_size=self.block_size,
-                replace_existing_hashes=True,
-            )
+            else:
+                return self.block_pool.cache_partial_block(
+                    request=request,
+                    block=checkpoint_block,
+                    num_tokens=checkpoint_position,
+                    kv_cache_group_id=self.kv_cache_group_id,
+                    block_size=self.block_size,
+                    replace_existing_hashes=True,
+                )
         if self.block_size == hash_block_size:
             return None
         if num_tokens % self.block_size == 0:
