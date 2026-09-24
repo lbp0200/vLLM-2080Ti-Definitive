@@ -982,8 +982,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Native FlashInfer decode reads persistent page metadata buffers that
         # can be refreshed in place between fused MTP draft steps. DCP and the
         # TRTLLM decode API own their metadata layout and keep the fallback.
+        # Eager wrappers copy the planned metadata internally and do not refer
+        # to the persistent buffers refreshed by update_draft_decode_metadata.
+        # Keep eager/safe mode on the existing rebuild path.
         self.supports_draft_decode_metadata_update = (
-            not self.use_dcp and not self.use_trtllm_decode_attention
+            self.enable_cuda_graph
+            and not self.use_dcp
+            and not self.use_trtllm_decode_attention
         )
         # Adaptive verification trims drafts on device, so decode query lengths
         # must come from the device qo_indptr; only trtllm-gen supports that
