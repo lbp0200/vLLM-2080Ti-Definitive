@@ -7,7 +7,7 @@ remain launcher options.
 ```bash
 ./launcher.sh \
   --model-dir /mnt/models/Qwen3.8-27B-FP8 \
-  --profile 2x2080Ti/qwen27b/w8a16/mtp4-fp16kv-1x145k-text-only.env \
+  --profile 2x2080Ti/qwen27b/w8a16/mtp4-fp16kv-1x148K-text-only.env \
   --mode fast \
   --gpu-devices 1,5 \
   --tp-size 2 \

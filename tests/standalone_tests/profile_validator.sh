@@ -93,4 +93,9 @@ case_dir="$TEST_ROOT/binary-context-label"
 profile=$(write_valid_profile "$case_dir" 'nomtp-fp16kv-1x128k-text-only.env')
 expect_invalid "$case_dir" 'filename context does not match MAX_MODEL_LEN'
 
+case_dir="$TEST_ROOT/near-binary-context-label"
+profile=$(write_valid_profile "$case_dir" 'nomtp-fp16kv-1x262K-text-only.env')
+sed -i 's/MAX_MODEL_LEN=131072/MAX_MODEL_LEN=268288/' "$profile"
+expect_invalid "$case_dir" 'filename context does not match MAX_MODEL_LEN'
+
 echo "profile_validator_ok"

@@ -182,14 +182,7 @@ while IFS= read -r -d '' file; do
     # Context labels are decimal thousands; uppercase K is canonical.
     expected_context=$((10#${BASH_REMATCH[1]}))
     actual_context_k=$((actual_context / 1000))
-    legacy_context=$((expected_context * 1024))
-    legacy_delta=$((actual_context - legacy_context))
-    (( legacy_delta < 0 )) && legacy_delta=$((-legacy_delta))
-    if [[ "$PROFILE_DIR" == "$ROOT/profiles" ]]; then
-      context_ok=$(( actual_context_k == expected_context || legacy_delta <= 1024 ))
-    else
-      context_ok=$(( actual_context_k == expected_context ))
-    fi
+    context_ok=$(( actual_context_k == expected_context ))
     (( context_ok )) || \
       profile_error "$rel" "filename context does not match MAX_MODEL_LEN"
   fi
