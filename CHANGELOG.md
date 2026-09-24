@@ -2,17 +2,50 @@
 
 This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately from upstream vLLM releases.
 
+## v0.2.2 - 2026-09-25
+
+Incremental release from the validated `v0.2.1` SM75 serving snapshot
+(`b296055efd`) through the current `main` branch. This release focuses on
+correctness and reproducibility for Qwen3.8 hybrid Mamba serving on Turing
+GPUs, and introduces the published runtime identity `vllm-def-cu130`.
+
+### Prefix caching and speculative decoding
+
+- Reuses DFlash2 target KV across prefix-cache hits and retires replaced
+  hashed Mamba states at aligned prefill boundaries.
+- Fixes FP8 KV hybrid prefix hits when the Mamba block size equals the hash
+  block size, including the 1648-token SM75 route.
+- Preserves request-row boundaries and hardens FULL-graph padding during
+  speculative replay.
+- Keeps SM75 DFlash2 tensor-parallel reductions in one scale domain.
+
+### MTP, GDN, and TurboQuant correctness
+
+- Prevents late prefills from pausing active MTP decode and preserves exact
+  verifier KV when a late prefill joins an MTP batch.
+- Fixes the hybrid-Mamba prefill barrier livelock and adds explicit alignment
+  limits and tail-cohort coverage.
+- Stabilizes TurboQuant verifier logits across late prefills and fails closed
+  when adaptive query boundaries cannot be honored.
+- Partitions stateful Qwen GDN forward execution and fixes SM75 GDN/DFlash
+  speculative quality regressions.
+
+### SM75 runtime and launcher
+
+- Prevents unsupported CUTLASS FP8 dispatch on SM75 by selecting the supported
+  fallback path.
+- Adds safer FULL-graph padding and trace controls for the SM75 runtime.
+- Makes the launcher load the model's generation configuration by default.
+- Synchronizes renamed validated profile references and refreshes the shipped
+- Adds the validated 4xT10 W8A16 FP8KV DFlash2 text-only route at 2x220K.
+- Keeps FlashInfer MTP draft metadata correct across metadata rebuilds and
+  preserves eager MTP execution for the SM75 compatibility path.
+
 ## v0.2.1 - 2026-09-19
 
 Stable release for the CUDA 13 / PyTorch 2.13 SM75 line.
 
-- Promotes the RC after final route, launcher, and documentation validation.
-- Publishes the formal `v0.2.1` version metadata and restores the release
-  update helper for in-place upgrades from an existing checkout.
-- Finalizes the flat Profile Guide, hand-written Profile schema, and bilingual
-  hardware reference documentation.
-- Refreshes the 4xT10 DFlash2 reference throughput with a repeated launcher
-  measurement: 191.89 tok/s at 4K input and 189.38 tok/s at 32K input.
+- Promotes the validated SM75 serving routes and profile set from the RC.
 
 ## v0.2.1-RC1 - 2026-09-18
 
@@ -22,16 +55,12 @@ Release candidate for the CUDA 13 / PyTorch 2.13 SM75 line.
   FlashInfer FA2 graph buffers, and live metadata refresh for FULL graph replay.
 - Fixes concurrent speculative graph sizing, automatic prefill alignment,
   independent target/draft KV pools, and concurrent MTP FA2 execution.
-- Expands the launcher with DFlash2 controls and reproducible 4K/128 plus
-  32K/512 startup benchmarks.
 - Generalizes qualified PCIe custom all-reduce to 2–16 GPUs and improves the
   CUDA 13 Torch/Triton mirror build path.
 - Converges profiles on validated routes, requires explicit KV precision, and
   removes unsupported concurrency presets.
 - Moves profiles to a flat hardware/model/weight route layout and makes `fast`
   the launcher default startup mode.
-- Reworks the bilingual README and launcher guides while removing stale reports
-  and redundant documentation.
 
 ## v0.2.1-pre4 - 2026-09-14
 
@@ -41,7 +70,6 @@ Nightly-alignment candidate based on upstream `b23433088b`
 - Adopts upstream replacements for previously local runtime fixes and retains
   only the SM75-specific FlashQLA, TurboQuant, parser, and rendezvous paths.
 - Keeps `humming-kernels[cu13]==0.1.13` for INT6/AutoRound loading.
-- Trims unrelated upstream documentation and automation from the fork.
 
 ## v0.2.1-pre3 - 2026-08-27
 

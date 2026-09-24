@@ -41,4 +41,4 @@
 3. NVFP4 W4A16 的 FP16KV 存在显著质量塌陷问题，因此不列入推荐 KV 类型。
 4. NVFP4 DFlash2 图文路线已使用明确的自然语言图像问题验证，正确返回“蓝色方形/橙色圆形”。由于 DFlash draft 不支持外部多模态 embedding，draft 侧使用纯文本输入；图像理解仍由 target model 完成。
 
-5. 测试环境：2026-09-19，软件版本 v0.2.1。测试主机为双路 Intel Xeon E5-2673 v4（共 80 个逻辑 CPU），内存 60 GiB，Swap 8 GiB。测试拓扑使用物理 GPU 1 和 5，两张 NVIDIA GeForce RTX 2080 Ti（每张 22,528 MiB），两卡之间为 NV2 连接；服务使用 TP2。NVIDIA 驱动版本为 595.91.07。运行环境为仓库的 `vllm-sm75-tp2-cu130`（CUDA 13.0，torch 2.13.0+cu130）。
+5. 测试环境：2026-09-19，软件版本 v0.2.1。测试主机为双路 Intel Xeon E5-2673 v4（共 80 个逻辑 CPU），内存 60 GiB，Swap 8 GiB。测试拓扑使用物理 GPU 1 和 5，两张 NVIDIA GeForce RTX 2080 Ti（每张 22,528 MiB），两卡之间为 NV2 连接；服务使用 TP2。NVIDIA 驱动版本为 595.91.07。运行环境为仓库的 `vllm-def-cu130`（CUDA 13.0，torch 2.13.0+cu130）。
