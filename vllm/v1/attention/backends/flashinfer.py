@@ -769,6 +769,11 @@ class FlashInferMetadata:
     num_prefill_tokens: int
     causal: bool
 
+    # Persistent tensors used to refresh native decode page metadata during
+    # fused speculative draft steps.
+    seq_lens: torch.Tensor
+    block_table_tensor: torch.Tensor
+
     prefill: FIPrefill | TRTLLMPrefill | None
     """
     Holds the metadata for the prefill portion of the batch.
@@ -973,6 +978,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.flashinfer_trtllm_api_decode_kernel = None
         self.use_xqa = (
             self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
+        )
+        # Native FlashInfer decode reads persistent page metadata buffers that
+        # can be refreshed in place between fused MTP draft steps. DCP and the
+        # TRTLLM decode API own their metadata layout and keep the fallback.
+        self.supports_draft_decode_metadata_update = (
+            not self.use_dcp and not self.use_trtllm_decode_attention
         )
         # Adaptive verification trims drafts on device, so decode query lengths
         # must come from the device qo_indptr; only trtllm-gen supports that
@@ -1562,6 +1573,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             causal=causal,
+            seq_lens=seq_lens,
+            block_table_tensor=block_table_tensor,
             use_cascade=use_cascade,
             prefill=None,
             decode=None,
@@ -1971,6 +1984,50 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
                 attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
         return attn_metadata
+
+    def update_draft_decode_metadata(self, metadata: FlashInferMetadata) -> None:
+        """Refresh native decode page metadata for a fused draft step."""
+        if not self.supports_draft_decode_metadata_update:
+            raise RuntimeError(
+                "FlashInfer draft metadata update is only supported for native "
+                "decode."
+            )
+        if metadata.decode is None or not isinstance(metadata.decode, FIDecode):
+            raise RuntimeError(
+                "FlashInfer draft metadata update requires native decode metadata."
+            )
+        if metadata.num_prefills != 0:
+            raise RuntimeError(
+                "FlashInfer draft metadata update does not support mixed prefill/decode."
+            )
+
+        num_reqs = metadata.num_decodes
+        if num_reqs <= 0:
+            return
+
+        seq_lens = metadata.seq_lens[:num_reqs]
+        num_blocks = (seq_lens + self.page_size - 1) // self.page_size
+        paged_kv_indptr = self.paged_kv_indptr.gpu[: num_reqs + 1]
+        paged_kv_indptr[:1].zero_()
+        torch.cumsum(num_blocks, dim=0, out=paged_kv_indptr[1:])
+
+        last_page_len = seq_lens.remainder(self.page_size)
+        last_page_len = torch.where(
+            (last_page_len == 0) & (seq_lens != 0),
+            self.page_size,
+            last_page_len,
+        )
+        self.paged_kv_last_page_len.gpu[:num_reqs].copy_(
+            last_page_len, non_blocking=True
+        )
+
+        _copy_page_indices_kernel[(num_reqs,)](
+            self.paged_kv_indices,
+            metadata.block_table_tensor,
+            metadata.block_table_tensor.stride(0),
+            paged_kv_indptr,
+            BLOCK_SIZE=1024,
+        )
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:
