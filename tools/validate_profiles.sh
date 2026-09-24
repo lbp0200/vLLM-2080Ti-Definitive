@@ -73,6 +73,7 @@ expected_profiles=(
   4xT10/qwen27b/w4a16/mtp4-fp8kv-2x262K-text-image.env
   4xT10/qwen27b/w8a16/dflash2-fp16kv-1x240K-text-image.env
   4xT10/qwen27b/w8a16/dflash2-fp16kv-1x262K-text-only.env
+  4xT10/qwen27b/w8a16/dflash2-fp8kv-2x220K-text-only.env
   4xT10/qwen27b/w8a16/mtp4-fp8kv-2x262K-text-image.env
   4xT10/qwen27b/w8a16/mtp4-fp16kv-1x262K-text-image.env
 )
