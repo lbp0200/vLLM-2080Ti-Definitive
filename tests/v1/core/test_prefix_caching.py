@@ -2280,6 +2280,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     # boundary == junction: 2 shared blocks (num_computed 0 + 2 uncached blocks).
     assert shared_prefix_boundary == 2 * block_size
 
+
     # Next, validate the align-mode Marconi split. It takes the shared-prefix
     # junction (absolute) and stops the chunk there (req_2 has num_computed 0).
     # Create minimal mock with just the needed attributes
@@ -2307,6 +2308,23 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     manager.free(req_0)
     manager.free(req_1)
     manager.free(req_2)
+
+
+def test_hybrid_mamba_equal_hash_block_uses_group_alignment():
+    """A larger scheduler chunk must not disable 1648-token prefix hits."""
+    block_size = 1648
+    config = _make_hybrid_kv_cache_config(block_size, 32, ["full", "mamba_align"])
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        enable_caching=True,
+        # 2048 is the prefill token budget; the hybrid KV scheduler block is
+        # still the 1648-token LCM reported by runtime profiling.
+        scheduler_block_size=block_size,
+        hash_block_size=block_size,
+    )
+    assert manager.coordinator.enable_partial_hash_hits
+    assert manager.coordinator._cache_hit_alignment_tokens == block_size
 
 
 def test_hybrid_model_mamba_align_with_dynamic_draft_tokens():
