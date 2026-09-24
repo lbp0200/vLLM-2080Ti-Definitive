@@ -151,11 +151,25 @@ MAX_BATCHED_TOKENS=512
 MODE=fast
 MODEL_FAMILY=qwen
 SPECULATIVE_MODEL=/models/dflash-draft
+GENERATION_CONFIG=auto
 VLLM_ARGS=()
 build_args 127.0.0.1
 args=$(printf '%s\n' "${VLLM_ARGS[@]}")
 grep -Fxq -- '--per-request-spec-decode-metrics' <<<"$args"
 grep -Fxq -- 'detailed' <<<"$args"
+grep -Fxq -- '--generation-config' <<<"$args"
+grep -Fxq -- 'auto' <<<"$args"
+
+GENERATION_CONFIG=vllm
+VLLM_ARGS=()
+build_args 127.0.0.1
+args=$(printf '%s\n' "${VLLM_ARGS[@]}")
+grep -Fxq -- 'vllm' <<<"$args"
+unset GENERATION_CONFIG
+VLLM_ARGS=()
+build_args 127.0.0.1
+args=$(printf '%s\n' "${VLLM_ARGS[@]}")
+grep -Fxq -- 'auto' <<<"$args"
 
 PER_REQUEST_SPEC_DECODE_METRICS=summary
 apply_speculative_runtime_defaults

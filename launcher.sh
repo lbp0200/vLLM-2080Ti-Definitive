@@ -4640,7 +4640,7 @@ build_args() {
     --served-model-name "$SERVED_NAME"
     --dtype half
     --tensor-parallel-size "${TP_SIZE:-2}"
-    --generation-config vllm
+    --generation-config "${GENERATION_CONFIG:-auto}"
     --gpu-memory-utilization "$GPU_UTIL"
     --max-model-len "$MAX_MODEL_LEN"
     --enable-chunked-prefill
