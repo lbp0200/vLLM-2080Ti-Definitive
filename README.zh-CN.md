@@ -109,7 +109,7 @@ TP/PP 拓扑、选择启动模式与网络配置，并在启动时自动完成�
 
 ```bash
 MODEL_DIR=/path/to/checkpoint \
-PROFILE=2x2080Ti/qwen27b/w8a16/mtp4-fp8kv-1x256k-text-only.env \
+PROFILE=2x2080Ti/qwen27b/w8a16/mtp4-fp8kv-1x262K-text-only.env \
 MODE=fast GPU_DEVICES=1,5 TP_SIZE=2 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
