@@ -18,6 +18,59 @@ assert_eq() {
 unset MODE
 normalize_mode
 assert_eq fast "$MODE" "default launch mode"
+init_config_registry
+[[ -n "${CONFIG_KNOWN_KEYS[MM_LIMIT_JSON]+x}" ]] || {
+  echo "MM_LIMIT_JSON missing from config registry" >&2
+  exit 1
+}
+
+reset_message_type_test_state() {
+  unset MESSAGE_TYPE MM_LIMIT_JSON MM_IMAGE_LIMIT LANGUAGE_MODEL_ONLY SKIP_MM_PROFILING
+  CONFIG_OVERRIDE_SOURCE=()
+  CONFIG_OVERRIDE_UNSET=()
+}
+
+reset_message_type_test_state
+MESSAGE_TYPE=text-only
+normalize_message_type_defaults
+assert_eq text-only "$MESSAGE_TYPE" "text-only message type"
+assert_eq "" "${MM_LIMIT_JSON:-}" "text-only multimodal limit"
+assert_eq "" "${MM_IMAGE_LIMIT:-}" "text-only image limit"
+
+reset_message_type_test_state
+MESSAGE_TYPE=text+image
+normalize_message_type_defaults
+assert_eq 64 "$MM_IMAGE_LIMIT" "default image limit"
+assert_eq '{"image":64,"video":0,"audio":0}' "$MM_LIMIT_JSON" "default multimodal limit"
+
+reset_message_type_test_state
+MESSAGE_TYPE=text+image
+MM_IMAGE_LIMIT=12
+normalize_message_type_defaults
+assert_eq '{"image":12,"video":0,"audio":0}' "$MM_LIMIT_JSON" "custom multimodal limit"
+
+reset_message_type_test_state
+MESSAGE_TYPE=text+image
+MM_LIMIT_JSON='{"image":3,"video":0,"audio":0}'
+MM_IMAGE_LIMIT=invalid
+CONFIG_OVERRIDE_SOURCE[MM_LIMIT_JSON]=cli
+normalize_message_type_defaults
+assert_eq '{"image":3,"video":0,"audio":0}' "$MM_LIMIT_JSON" "explicit multimodal JSON"
+
+reset_message_type_test_state
+MESSAGE_TYPE=text+image
+MM_LIMIT_JSON='{"image":1,"video":0,"audio":0}'
+normalize_message_type_defaults
+assert_eq 64 "$MM_IMAGE_LIMIT" "legacy image limit migration"
+assert_eq '{"image":64,"video":0,"audio":0}' "$MM_LIMIT_JSON" "legacy multimodal limit migration"
+
+reset_message_type_test_state
+MESSAGE_TYPE=text+image
+MM_IMAGE_LIMIT=0
+if normalize_message_type_defaults 2>/dev/null; then
+  echo "invalid image limit unexpectedly accepted" >&2
+  exit 1
+fi
 
 MODE=normal
 normalize_mode

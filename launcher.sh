@@ -898,6 +898,8 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   STATE_FILE
   FLASHQLA_ROOT
   START_TIMEOUT
+  MM_IMAGE_LIMIT
+  MM_LIMIT_JSON
   CUDA_HOME
   CUDA_VISIBLE_DEVICES
   CUDA_DEVICE_ORDER
@@ -1391,6 +1393,7 @@ save_manager_state() {
     printf 'PER_REQUEST_SPEC_DECODE_METRICS=%q\n' "${PER_REQUEST_SPEC_DECODE_METRICS:-}"
     printf 'MESSAGE_TYPE=%q\n' "${MESSAGE_TYPE:-}"
     printf 'MM_LIMIT_JSON=%q\n' "${MM_LIMIT_JSON:-}"
+    printf 'MM_IMAGE_LIMIT=%q\n' "${MM_IMAGE_LIMIT:-}"
     printf 'LANGUAGE_MODEL_ONLY=%q\n' "${LANGUAGE_MODEL_ONLY:-}"
     printf 'SKIP_MM_PROFILING=%q\n' "${SKIP_MM_PROFILING:-}"
     printf 'HF_OVERRIDES_JSON=%q\n' "${HF_OVERRIDES_JSON:-}"
@@ -1652,6 +1655,15 @@ apply_prefix_cache_defaults() {
   fi
 }
 
+normalize_mm_image_limit() {
+  local value=${1:-64}
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || {
+    echo "ERROR: MM_IMAGE_LIMIT must be a positive integer." >&2
+    return 1
+  }
+  printf '%s\n' "$value"
+}
+
 normalize_message_type_defaults() {
   if config_key_has_explicit_value MESSAGE_TYPE; then
     MESSAGE_TYPE=${MESSAGE_TYPE:-text-only}
@@ -1663,7 +1675,13 @@ normalize_message_type_defaults() {
 
   if [[ "$MESSAGE_TYPE" == "text+image" ]]; then
     if ! config_key_has_explicit_value MM_LIMIT_JSON; then
-      MM_LIMIT_JSON=${MM_LIMIT_JSON:-'{"image":1,"video":0,"audio":0}'}
+      # Migrate the old generated one-image state value. Non-default JSON is
+      # retained as the advanced override unless the user explicitly changes it.
+      if [[ -z "${MM_LIMIT_JSON:-}" ||
+            "${MM_LIMIT_JSON:-}" == '{"image":1,"video":0,"audio":0}' ]]; then
+        MM_IMAGE_LIMIT=$(normalize_mm_image_limit "${MM_IMAGE_LIMIT:-64}") || return 1
+        MM_LIMIT_JSON=$(printf '{"image":%s,"video":0,"audio":0}' "$MM_IMAGE_LIMIT")
+      fi
     fi
     if ! config_key_has_explicit_value LANGUAGE_MODEL_ONLY; then
       LANGUAGE_MODEL_ONLY=0
@@ -1674,6 +1692,9 @@ normalize_message_type_defaults() {
   else
     if ! config_key_has_explicit_value MM_LIMIT_JSON; then
       MM_LIMIT_JSON=""
+    fi
+    if ! config_key_has_explicit_value MM_IMAGE_LIMIT; then
+      MM_IMAGE_LIMIT=""
     fi
     if ! config_key_has_explicit_value LANGUAGE_MODEL_ONLY; then
       LANGUAGE_MODEL_ONLY=1
@@ -2011,6 +2032,7 @@ profile_summary() {
     VLLM_ALLOW_LONG_MAX_MODEL_LEN
     CUSTOM_ALL_REDUCE_MODE
     MM_LIMIT_JSON
+    MM_IMAGE_LIMIT
     HF_OVERRIDES_JSON
   )
 
@@ -2611,6 +2633,8 @@ Notes:
     enables strict tool-output constraints for automatic tool choice.
   - thinking_token_budget is a per-request chat parameter in this vLLM runtime.
   - text+image requires a checkpoint that actually supports vision inputs.
+  - text+image defaults to 64 images per prompt; set MM_IMAGE_LIMIT to change
+    that bound. MM_LIMIT_JSON remains the advanced override.
   - Non-interactive mode accepts launcher keys as --lower-kebab-case VALUE.
   - Use --set KEY=VALUE for advanced envs such as VLLM_* or compiler paths.
   - Use --unset KEY to clear inherited profile/env values and fall back to
@@ -3264,7 +3288,7 @@ edit_advanced_parameters() {
   CUSTOM_ALL_REDUCE_MODE=$(prompt_optional "Custom all-reduce mode (auto/off)" "${CUSTOM_ALL_REDUCE_MODE:-auto}") || return 0
   unset DISABLE_CUSTOM_ALL_REDUCE
   DISABLE_LOG_STATS=$(prompt_toggle01 "Disable log stats" "${DISABLE_LOG_STATS:-0}") || return 0
-  normalize_message_type_defaults
+  normalize_message_type_defaults || return 1
 }
 
 edit_runtime_parameters() {
@@ -3302,7 +3326,11 @@ edit_runtime_parameters() {
   message_choice=$(menu_select "Message type" "$current_message_type" "text-only" "text+image") || return 0
   MESSAGE_TYPE="$message_choice"
   if [[ "$MESSAGE_TYPE" == "text+image" ]]; then
-    MM_LIMIT_JSON=${MM_LIMIT_JSON:-'{"image":1,"video":0,"audio":0}'}
+    MM_IMAGE_LIMIT=$(prompt_default "Maximum images per prompt" "${MM_IMAGE_LIMIT:-64}") || return 0
+    MM_IMAGE_LIMIT=$(normalize_mm_image_limit "$MM_IMAGE_LIMIT") || return 1
+    if ! config_key_has_explicit_value MM_LIMIT_JSON; then
+      MM_LIMIT_JSON=$(printf '{"image":%s,"video":0,"audio":0}' "$MM_IMAGE_LIMIT")
+    fi
     LANGUAGE_MODEL_ONLY=0
     SKIP_MM_PROFILING=0
   else
@@ -3311,7 +3339,7 @@ edit_runtime_parameters() {
     SKIP_MM_PROFILING=1
   fi
   edit_advanced_parameters
-  normalize_message_type_defaults
+  normalize_message_type_defaults || return 1
 
   save_manager_state
 }
@@ -3334,7 +3362,11 @@ edit_message_type_menu() {
   message_choice=$(menu_select "Message type" "$current_message_type" "text-only" "text+image") || return 0
   MESSAGE_TYPE="$message_choice"
   if [[ "$MESSAGE_TYPE" == "text+image" ]]; then
-    MM_LIMIT_JSON=${MM_LIMIT_JSON:-'{"image":1,"video":0,"audio":0}'}
+    MM_IMAGE_LIMIT=$(prompt_default "Maximum images per prompt" "${MM_IMAGE_LIMIT:-64}") || return 0
+    MM_IMAGE_LIMIT=$(normalize_mm_image_limit "$MM_IMAGE_LIMIT") || return 1
+    if ! config_key_has_explicit_value MM_LIMIT_JSON; then
+      MM_LIMIT_JSON=$(printf '{"image":%s,"video":0,"audio":0}' "$MM_IMAGE_LIMIT")
+    fi
     LANGUAGE_MODEL_ONLY=0
     SKIP_MM_PROFILING=0
   else
@@ -3342,7 +3374,7 @@ edit_message_type_menu() {
     LANGUAGE_MODEL_ONLY=1
     SKIP_MM_PROFILING=1
   fi
-  normalize_message_type_defaults
+  normalize_message_type_defaults || return 1
   save_manager_state
 }
 
@@ -3582,7 +3614,7 @@ runtime_parameter_menu() {
         edit_spec_decode_metrics_menu
         ;;
       "Message type:"*)
-        edit_message_type_menu
+        edit_message_type_menu || continue
         ;;
       "Chat template:"*)
         select_template_preset_menu
@@ -3597,11 +3629,11 @@ runtime_parameter_menu() {
         edit_prefix_cache_menu
         ;;
       "Advanced options")
-        edit_advanced_parameters
+        edit_advanced_parameters || continue
         save_manager_state
         ;;
       "Edit all fields")
-        edit_runtime_parameters
+        edit_runtime_parameters || continue
         ;;
       "Return")
         return 0
@@ -5722,7 +5754,7 @@ prepare_runtime_defaults() {
   MODE=${MODE:-fast}
   normalize_mode
   SERVICE_SCOPE=${SERVICE_SCOPE:-local}
-  normalize_message_type_defaults
+  normalize_message_type_defaults || return 1
   derive_yarn_overrides || return 1
   apply_speculative_runtime_defaults
   apply_prefix_cache_defaults
