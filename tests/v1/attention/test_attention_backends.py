@@ -952,6 +952,8 @@ def test_flashinfer_xqa_single_token_decode_preserves_cudagraph_padding(monkeypa
         num_prefills=0,
         num_prefill_tokens=0,
         causal=True,
+        seq_lens=torch.tensor([8, 8, 0, 0], dtype=torch.int32),
+        block_table_tensor=torch.zeros((4, 1), dtype=torch.int32),
         prefill=None,
         decode=decode,
         use_cascade=False,
