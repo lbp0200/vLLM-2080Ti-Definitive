@@ -42,9 +42,9 @@ profile 和验证资料。它基于上游 vLLM；再发布派生版本时必须�
 本 fork 通过 Marlin、FlashInfer/FlashQLA、TurboQuant/INT8 KV、MTP/DFlash2 和 CUDA
 Graph，把这些硬件资源转成可用的 serving 栈。
 
-第二类主要目标硬件是四张通过 PCIe 连接的 16 GiB Tesla T10，面向 TP=4 的
-Qwen 27B 服务。18 条路线已经完成启动和参考负载审计；存在图像语义失败的路线
-会在硬件 README 中明确保留为 candidate。
+支持的硬件还包括两张通过 PCIe 连接的 16 GiB Tesla T10，提供已验证的 TP=2
+Qwen 27B 路线。四卡 Tesla T10 Profile 面向 TP=4 服务；存在图像语义失败的路线
+会在硬件 README 中明确标记为 candidate。
 
 ## 🧩 支持状态
 
@@ -52,7 +52,7 @@ Qwen 27B 服务。18 条路线已经完成启动和参考负载审计；存在�
 
 支持的模型路线和实测数据以对应硬件组的 profile 说明为准。
 
-Launcher 支持 TP、PP 及 TP/PP 混合推理；当前主要布局为双 RTX 2080 Ti（TP=2）和四张 Tesla T10（TP=4）。
+Launcher 支持 TP、PP 及 TP/PP 混合推理；已验证布局包括双 RTX 2080 Ti（TP=2）、双 Tesla T10（TP=2）和四张 Tesla T10（TP=4）。
 
 ## 🧪 已验证模型路线
 
@@ -62,6 +62,7 @@ Launcher 支持 TP、PP 及 TP/PP 混合推理；当前主要布局为双 RTX 20
 | --- | --- | --- | --- | --- |
 | Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | 高精度单并发 | `qwen27b/w8a16` |
 | Qwen3.8 27B | NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | 长上下文多并发 | `qwen27b/w4a16` |
+| Qwen3.8 27B | INT4 (W4A16) | [RedHatAI/Qwen3.8-27B-INT4](https://huggingface.co/RedHatAI/Qwen3.8-27B-INT4) | 2xT10 MTP3 推理 | `qwen27b/w4a16` |
 | Qwen3.x 35B | FP8 | [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8) | 个人快速推理 | `qwen35b/w8a16` |
 
 ## ⚡ 性能亮点
@@ -120,7 +121,8 @@ NON_INTERACTIVE=1 ./launcher.sh
 ## 🧭 Profile 与推荐路线
 
 目录结构和路线字段请参阅 [Profile 指南](profiles/README.zh-CN.md)；详细 Profile
-说明与参考性能见 [2x2080Ti](profiles/2x2080Ti/README.zh-CN.md) 和
+说明与参考性能见 [2x2080Ti](profiles/2x2080Ti/README.zh-CN.md)、
+[2xT10](profiles/2xT10/README.zh-CN.md) 和
 [4xT10](profiles/4xT10/README.zh-CN.md)。
 
 Profile 按扁平路径 `profiles/<硬件>/<模型>/<权重>/<路线>.env` 组织。启动模式由
@@ -139,7 +141,9 @@ reasoning 默认值由 launcher 统一管理。
 ## 🛠️ 目标硬件
 
 - 两张经 NVLink 连接的 RTX 2080 Ti 22 GB
-- NVIDIA Turing / SM75，tensor parallel size 2
+- 两张通过 PCIe 连接的 16 GiB Tesla T10（TP=2 Profile）
+- 四张通过 PCIe 连接的 16 GiB Tesla T10（TP=4 Profile）
+- NVIDIA Turing / SM75，已验证的 tensor parallel size 为 2 和 4
 - `0.2.x` 目标：CUDA 13.0、PyTorch 2.13、Python 3.12
 - 目标主机：Ubuntu 26.04 及以上、Linux kernel 7 及以上、GCC/G++ 15
 

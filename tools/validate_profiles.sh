@@ -53,6 +53,10 @@ total=0
 errors=0
 
 expected_profiles=(
+  2xT10/qwen27b/w4a16/mtp3-fp8kv-1x262K-text-only.env
+  2xT10/qwen27b/w4a16/mtp3-tq4nc-2x220K-text-only.env
+  2xT10/qwen27b/w4a16/mtp3-tqk8v4-1x196K-text-image.env
+  2xT10/qwen27b/w4a16/mtp3-tqk8v4-2x155K-text-only.env
   2x2080Ti/qwen27b/w8a16/nomtp-fp16kv-1x121K-text-image.env
   2x2080Ti/qwen27b/w8a16/nomtp-fp16kv-1x176K-text-only.env
   2x2080Ti/qwen27b/w8a16/mtp4-fp16kv-1x148K-text-only.env
