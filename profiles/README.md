@@ -15,6 +15,7 @@ selects the startup mode, defaulting to `fast`.
 profiles/
   2x2080Ti/   # [profile details and reference performance](2x2080Ti/README.md)
   4xT10/      # [profile details and reference performance](4xT10/README.md)
+  2xT10/      # [profile details and reference performance](2xT10/README.md)
 ```
 
 Profile filenames use `<decoder>-<kv>-<concurrency><context>-<message>.env`.

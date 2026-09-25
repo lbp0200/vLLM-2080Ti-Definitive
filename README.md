@@ -45,10 +45,10 @@ for serious local 27B and 35B-class serving rather than only small-model use.
 The fork turns those hardware properties into a usable serving stack through
 Marlin, FlashInfer/FlashQLA, TurboQuant/INT8 KV, MTP/DFlash2, and CUDA Graph support.
 
-The second supported hardware family is four 16 GiB Tesla T10 GPUs over PCIe.
-Those profiles target TP=4 Qwen 27B serving. The 18-route library has been
-audited for startup and reference workloads; routes with a noted image-semantic
-failure remain explicitly marked as candidates.
+The supported hardware families also include two 16 GiB Tesla T10 GPUs over
+PCIe, with validated TP=2 Qwen 27B routes. The four-GPU Tesla T10 profiles
+target TP=4 serving; routes with a noted image-semantic failure remain explicitly
+marked as candidates.
 
 ## 🧩 Support Status
 
@@ -57,7 +57,9 @@ The current target environment is Ubuntu 26.04 or later, Linux kernel 7 or later
 Supported model routes and their measurements are listed in the corresponding
 hardware profile guides.
 
-The launcher supports TP, PP, and mixed TP/PP inference; the primary layouts are two RTX 2080 Ti GPUs with TP=2 and four Tesla T10 GPUs with TP=4.
+The launcher supports TP, PP, and mixed TP/PP inference; validated layouts
+include two RTX 2080 Ti GPUs with TP=2, two Tesla T10 GPUs with TP=2, and four
+Tesla T10 GPUs with TP=4.
 
 ## 🧪 Tested Model Checkpoints
 
@@ -67,6 +69,7 @@ Current tested model and weight routes:
 | --- | --- | --- | --- | --- |
 | Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | High-precision single-request inference | `qwen27b/w8a16` |
 | Qwen3.8 27B | NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | Long-context concurrent inference | `qwen27b/w4a16` |
+| Qwen3.8 27B | INT4 (W4A16) | [RedHatAI/Qwen3.8-27B-INT4](https://huggingface.co/RedHatAI/Qwen3.8-27B-INT4) | 2xT10 MTP3 serving | `qwen27b/w4a16` |
 | Qwen3.x 35B | FP8 | [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8) | Fast personal inference | `qwen35b/w8a16` |
 
 ## ⚡ Highlights
@@ -129,6 +132,7 @@ Use `./launcher.sh --print-config` to preview a route. See the
 Read the [Profile Guide](profiles/README.md) for the layout and route fields.
 Detailed profiles and reference performance are listed for
 [2x2080Ti](profiles/2x2080Ti/README.md) and
+[2xT10](profiles/2xT10/README.md), and
 [4xT10](profiles/4xT10/README.md).
 
 Profiles use the flat layout `profiles/<hardware>/<model>/<weight>/<route>.env`.
@@ -148,7 +152,9 @@ port, target and draft model paths, chat template, and reasoning defaults.
 ## 🛠️ Hardware Target
 
 - Two RTX 2080 Ti 22 GB GPUs connected by NVLink
-- NVIDIA Turing / SM75, tensor parallel size 2
+- Two 16 GiB Tesla T10 GPUs over PCIe (TP=2 profiles)
+- Four 16 GiB Tesla T10 GPUs over PCIe (TP=4 profiles)
+- NVIDIA Turing / SM75, with validated tensor parallel sizes 2 and 4
 - `0.2.x` target: CUDA 13.0, PyTorch 2.13, Python 3.12
 - Target host: Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15
 

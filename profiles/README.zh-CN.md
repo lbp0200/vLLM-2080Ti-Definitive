@@ -13,6 +13,7 @@ Profile 按硬件、模型和权重格式分组。每个硬件/模型/权重目�
 profiles/
   2x2080Ti/   # [详细 Profile 说明与参考性能](2x2080Ti/README.zh-CN.md)
   4xT10/      # [详细 Profile 说明与参考性能](4xT10/README.zh-CN.md)
+  2xT10/      # [详细 Profile 说明与参考性能](2xT10/README.zh-CN.md)
 ```
 
 Profile 文件名统一使用 `<解码类型>-<KV精度>-<并发数><上下文>-<消息类型>.env`。
