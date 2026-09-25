@@ -725,7 +725,11 @@ class Scheduler(SchedulerInterface):
             if input_budget <= draft_slots:
                 break
 
-            if defer_decode_for_prefill_batch and not request.is_prefill_chunk:
+            if (
+                defer_decode_for_prefill_batch
+                and not request.is_prefill_chunk
+                and request.num_output_tokens == 0
+            ):
                 req_index += 1
                 continue
 

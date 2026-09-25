@@ -438,7 +438,7 @@ def test_prefill_batch_barrier_does_not_pause_decode_for_late_request():
     assert running in scheduler.running
 
     (late,) = create_requests(
-        num_requests=1, num_tokens=512, max_tokens=8, req_ids=["late"]
+        num_requests=1, num_tokens=1024, max_tokens=8, req_ids=["late"]
     )
     scheduler.add_request(late)
     second = scheduler.schedule()
@@ -446,6 +446,23 @@ def test_prefill_batch_barrier_does_not_pause_decode_for_late_request():
     assert "running" in second.num_scheduled_tokens
     assert "late" in second.num_scheduled_tokens
     assert second.num_scheduled_tokens["running"] >= 1
+    scheduler.update_from_output(
+        second,
+        ModelRunnerOutput(
+            req_ids=["running", "late"],
+            req_id_to_index={"running": 0, "late": 1},
+            sampled_token_ids=[[0], []],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # Once the late request is running, its remaining prefill must not
+    # suspend a request that has already started decoding.
+    third = scheduler.schedule()
+    assert "running" in third.num_scheduled_tokens
+    assert "late" in third.num_scheduled_tokens
 
 
 def test_cached_request_data_resumed_all_token_ids_mrv1_only():
