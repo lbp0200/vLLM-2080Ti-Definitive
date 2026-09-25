@@ -1038,8 +1038,19 @@ class MambaSpec(KVCacheSpec):
                 cdiv(max_model_len, self.block_size) + self.num_speculative_blocks
             ) * self.page_size_bytes
         elif vllm_config.cache_config.mamba_cache_mode == "align":
+            speculative_method = getattr(
+                vllm_config.speculative_config, "method", None
+            )
+            # DFlash keeps draft KV in independent pools and does not execute
+            # Mamba layers for lookahead tokens. Keep one additional resident
+            # state page for target replay while omitting draft lookahead pages.
+            resident_state_blocks = (
+                3 if speculative_method in ("dflash", "dspark") else 2
+            )
             return self.page_size_bytes * (
-                2 + self.num_speculative_blocks + self.num_prefill_checkpoint_blocks
+                resident_state_blocks
+                + self.num_speculative_blocks
+                + self.num_prefill_checkpoint_blocks
             )
         else:
             return self.page_size_bytes * (1 + self.num_speculative_blocks)
