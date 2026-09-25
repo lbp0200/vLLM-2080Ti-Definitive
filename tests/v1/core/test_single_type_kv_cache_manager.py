@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -30,6 +32,45 @@ from vllm.v1.kv_cache_interface import (
 )
 
 pytestmark = pytest.mark.cpu_test
+
+
+def test_dflash_target_mamba_does_not_reserve_speculative_pages():
+    """DFlash uses independent draft KV and needs no target Mamba lookahead pages."""
+
+    class StubMamba:
+        get_state_shape = lambda self: ((1, 1),)
+        get_state_dtype = lambda self: (torch.float32,)
+        is_kv_cache_tp_replicated = False
+        mamba_type = None
+
+    cache_config = SimpleNamespace(
+        mamba_block_size=16,
+        mamba_page_size_padded=None,
+        mamba_cache_mode="align",
+        use_kda_recoverssm=False,
+    )
+    dflash_config = SimpleNamespace(
+        cache_config=cache_config,
+        speculative_config=SimpleNamespace(method="dflash"),
+        num_speculative_tokens=7,
+    )
+    mtp_config = SimpleNamespace(
+        cache_config=cache_config,
+        speculative_config=SimpleNamespace(method="mtp"),
+        num_speculative_tokens=3,
+    )
+
+    dflash_spec = MambaBase.get_kv_cache_spec(StubMamba(), dflash_config)
+    mtp_spec = MambaBase.get_kv_cache_spec(StubMamba(), mtp_config)
+
+    assert dflash_spec.num_speculative_blocks == 0
+    assert mtp_spec.num_speculative_blocks == 3
+    assert dflash_spec.max_memory_usage_bytes(
+        dflash_config
+    ) == 3 * dflash_spec.page_size_bytes
+    assert mtp_spec.max_memory_usage_bytes(
+        mtp_config
+    ) == 5 * mtp_spec.page_size_bytes
 
 
 def test_external_computed_blocks_do_not_corrupt_free_pool():
