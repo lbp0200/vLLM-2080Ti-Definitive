@@ -35,7 +35,7 @@ pytestmark = pytest.mark.cpu_test
 
 
 def test_dflash_target_mamba_does_not_reserve_speculative_pages():
-    """DFlash uses independent draft KV and needs no target Mamba lookahead pages."""
+    """DFlash uses independent draft KV and four target replay-state pages."""
 
     class StubMamba:
         get_state_shape = lambda self: ((1, 1),)
@@ -67,7 +67,7 @@ def test_dflash_target_mamba_does_not_reserve_speculative_pages():
     assert mtp_spec.num_speculative_blocks == 3
     assert dflash_spec.max_memory_usage_bytes(
         dflash_config
-    ) == 3 * dflash_spec.page_size_bytes
+    ) == 4 * dflash_spec.page_size_bytes
     assert mtp_spec.max_memory_usage_bytes(
         mtp_config
     ) == 5 * mtp_spec.page_size_bytes

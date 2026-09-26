@@ -1042,10 +1042,11 @@ class MambaSpec(KVCacheSpec):
                 vllm_config.speculative_config, "method", None
             )
             # DFlash keeps draft KV in independent pools and does not execute
-            # Mamba layers for lookahead tokens. Keep one additional resident
-            # state page for target replay while omitting draft lookahead pages.
+            # Mamba layers for lookahead tokens. Keep one active replay page
+            # plus three hashed boundary pages for target reuse while omitting
+            # draft lookahead pages from this pool.
             resident_state_blocks = (
-                3 if speculative_method in ("dflash", "dspark") else 2
+                4 if speculative_method in ("dflash", "dspark") else 2
             )
             return self.page_size_bytes * (
                 resident_state_blocks
@@ -1061,7 +1062,7 @@ class MambaSpec(KVCacheSpec):
         if vllm_config.cache_config.mamba_cache_mode == "align":
             # Block table rows are position-indexed over the full sequence
             # even though only a small resident state set is live at a time:
-            # normally 2 + num_speculative_blocks blocks, or 3 resident
+            # normally 2 + num_speculative_blocks blocks, or 4 resident
             # blocks for DFlash/DSpark. Earlier states are nulled out by
             # remove_skipped_blocks, so the row length must cover max_len
             # rather than max_memory_usage_bytes.
